@@ -62,6 +62,15 @@ class UserState:
         self.strategy6_min_score = 85          # minimum confluence score for Strategy 6
         self.strategy6_min_candles = 50        # minimum candles required before analysis
         self.ai_mode = False                   # AI Mode flag
+        # Money Management fields
+        self.mm_enabled = False
+        self.mm_balance = 0.0                  # starting balance
+        self.mm_current_balance = 0.0          # live tracked balance
+        self.mm_tp = 0.0                       # daily take-profit target
+        self.mm_sl = 0.0                       # daily stop-loss limit
+        self.mm_base_amount = 0.0              # calculated base trade amount
+        self.mm_consecutive_losses = 0         # cross-signal martingale counter
+        self.mm_pnl = 0.0                      # today's P&L tracking
 
 user_states: Dict[int, UserState] = {}
 def get_state(uid: int) -> UserState:
@@ -1032,11 +1041,10 @@ def analyze_strategy6(candles, min_score=20, min_candles=10):
 
 # ══════════════ AI MODE — Multi-strategy consensus engine ══════════════
 def _ai_analyze_pair(pair, candles, payout_num):
-    """Run all 6 strategies on a single pair, return list of hits."""
+    """Run strategies 2-6 on a single pair (ST1 excluded — too basic/unreliable)."""
     hits = []
     s2_filters = Strategy2Filters()
     analyzers = [
-        (1, lambda c: analyze_strategy1(c, 65)),
         (2, lambda c: analyze_strategy2(c, s2_filters)),
         (3, lambda c: analyze_strategy3(c, 65, 20)),
         (4, lambda c: analyze_strategy4(c, 55)),
@@ -1119,7 +1127,7 @@ def _ai_build_analysis_msg(ranked, scan_time_sec):
         f"💲 Payout∶— {fancy_font(str(top['payout']) + '%')}\n"
         f"┗───˚⊹ ─────────♡───┛\n\n"
         f"🔥 Strategy Consensus\n"
-        f"✅ {top['n_strategies']}/6 strategies agree {stars}\n"
+        f"✅ {top['n_strategies']}/5 strategies agree {stars}\n"
         f"🔰 Strategies∶ {fancy_font(strat_list)}\n"
         f"🏆 Best∶ ST{top['best_strategy']} ({top['best_score']}%)\n"
         f"📊 Average∶ {top['avg_score']}%\n\n"
@@ -1161,20 +1169,20 @@ def _ai_build_result_msg(pair, direction, result, score, n_strats, wins, losses)
         f"{r_emoji} Result∶— {fancy_font(r_text)}\n"
         f"💎 AI Score∶— {fancy_font(str(score) + '%')}\n"
         f"🏆 Win Rate∶— {fancy_font(f'{wr:.0f}%')} ({wins}W/{losses}L)\n"
-        f"🔰 Strategies∶ {n_strats}/6 agreed\n"
+        f"🔰 Strategies∶ {n_strats}/5 agreed\n"
         f"┗───˚⊹ ─────────♡───┛\n\n"
         f"✨ ©OWNER @Rohailtrader ✨"
     )
 
 def run_ai_mode(uid):
-    """AI Mode: scan all pairs with all 6 strategies, pick the best signal."""
+    """AI Mode: scan all pairs with ST2-6 (ST1 excluded), pick the best signal."""
     st = get_state(uid)
     st.running = True
     st.stop_requested = False
 
     progress_msg = sender.send_message(uid,
         "🤖 AI Mode activated!\n"
-        "⏳ Scanning all pairs with 6 strategies...\n"
+        "⏳ Scanning all pairs with 5 strategies (ST2-6)...\n"
         "💎 Finding the best signal for you...\n\n"
         f"{progress_bar_text(0)}"
     )
@@ -1195,7 +1203,7 @@ def run_ai_mode(uid):
         sender.edit_message(uid, progress_id,
             f"🤖 AI Mode — Scanning...\n"
             f"📊 Analyzing {pair}\n"
-            f"🔥 Running ST1-6 analysis\n"
+            f"🔥 Running ST2-6 analysis\n"
             f"✅ {len(all_hits)} signals found so far\n\n"
             f"{progress_bar_text(pct)}"
         )
@@ -1245,7 +1253,7 @@ def run_ai_mode(uid):
     sender.edit_message(uid, progress_id,
         f"🤖 AI Mode — ✅ Best signal found!\n"
         f"📊 {top['pair']} → {top['direction']}\n"
-        f"💎 AI Score: {top['final_score']}% ({top['n_strategies']}/6 strategies)\n\n"
+        f"💎 AI Score: {top['final_score']}% ({top['n_strategies']}/5 strategies)\n\n"
         "Sending chart..."
     )
 
@@ -1254,6 +1262,11 @@ def run_ai_mode(uid):
         sender.send_message(uid, "❌ Failed to fetch chart data. Try again.")
         st.running = False
         return
+
+    try:
+        payout_pct = float(str(top['payout']).replace("%", ""))
+    except (ValueError, TypeError):
+        payout_pct = 92.0
 
     entry_t = top['entry_dt'].strftime("%H:%M")
     chart_path = draw_neon_chart(candles, top['pair'], entry_t, top['direction'], top['payout'],
@@ -1269,6 +1282,10 @@ def run_ai_mode(uid):
             pass
     else:
         sender.send_message(uid, analysis_msg)
+
+    # Send MM signal message if enabled
+    if st.mm_enabled:
+        sender.send_message(uid, mm_build_signal_msg(st, top['pair'], top['direction']))
 
     entry_dt_utc5 = top['entry_dt']
     direction = top['direction']
@@ -1317,6 +1334,11 @@ def run_ai_mode(uid):
                 pass
         else:
             sender.send_message(uid, result_msg)
+        if st.mm_enabled:
+            pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "WIN", payout_pct)
+            sender.send_message(uid, mm_build_result_msg(st, "WIN", pl, old_bal))
+            if tp_hit or sl_hit:
+                st.mm_enabled = False
         sender.send_message(uid,
             "🤖 AI Mode — Use /continue for next AI signal, or /stop to return.")
         st.running = False
@@ -1356,6 +1378,11 @@ def run_ai_mode(uid):
                 pass
         else:
             sender.send_message(uid, result_msg)
+        if st.mm_enabled:
+            pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "MTG WIN", payout_pct)
+            sender.send_message(uid, mm_build_result_msg(st, "MTG WIN", pl, old_bal))
+            if tp_hit or sl_hit:
+                st.mm_enabled = False
     else:
         st.stats['losses'] += 1
         result_msg = _ai_build_result_msg(pair, direction, "LOSS",
@@ -1374,6 +1401,11 @@ def run_ai_mode(uid):
                 pass
         else:
             sender.send_message(uid, result_msg)
+        if st.mm_enabled:
+            pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "LOSS", payout_pct)
+            sender.send_message(uid, mm_build_result_msg(st, "LOSS", pl, old_bal))
+            if tp_hit or sl_hit:
+                st.mm_enabled = False
 
     sender.send_message(uid,
         "🤖 AI Mode — Use /continue for next AI signal, or /stop to return.")
@@ -2041,6 +2073,8 @@ class SMZXBot:
                     entry_t = entry_dt.strftime("%H:%M")
                     sender.edit_message(uid, progress_id, "✅ Signal found! Sending...")
                     self.send_signal_with_chart(pair, price, bias, entry_t, candles, payout, confidence=score)
+                    if st.mm_enabled:
+                        sender.send_message(uid, mm_build_signal_msg(st, pair, bias))
                     sender.edit_message(uid, progress_id, "⏳ Monitoring result...")
                     self.handle_signal_result(pair, entry_dt, bias, payout, candles)
                     signal_found = True
@@ -2056,6 +2090,10 @@ class SMZXBot:
 
     def handle_signal_result(self, pair, entry_dt_utc5, direction, payout, initial_candles):
         st = get_state(self.uid)
+        try:
+            payout_pct = float(str(payout).replace("%", ""))
+        except (ValueError, TypeError):
+            payout_pct = 92.0
         close_time_1 = entry_dt_utc5 + timedelta(minutes=1)
         self.sleep_until(close_time_1)
         if st.stop_requested: return
@@ -2071,6 +2109,11 @@ class SMZXBot:
         if win1:
             st.stats['wins'] += 1
             self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "WIN", candles, direction=direction)
+            if st.mm_enabled:
+                pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "WIN", payout_pct)
+                sender.send_message(self.uid, mm_build_result_msg(st, "WIN", pl, old_bal))
+                if tp_hit or sl_hit:
+                    st.mm_enabled = False
             return
         close_time_2 = entry_dt_utc5 + timedelta(minutes=2)
         self.sleep_until(close_time_2)
@@ -2085,9 +2128,19 @@ class SMZXBot:
             st.signal_history[-1]['type'] = "MTG"
             st.stats['wins'] += 1
             self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, second, payout, "MTG WIN", candles2, direction=direction)
+            if st.mm_enabled:
+                pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "MTG WIN", payout_pct)
+                sender.send_message(self.uid, mm_build_result_msg(st, "MTG WIN", pl, old_bal))
+                if tp_hit or sl_hit:
+                    st.mm_enabled = False
         else:
             st.stats['losses'] += 1
             self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "LOSS", candles2, direction=direction)
+            if st.mm_enabled:
+                pl, old_bal, tp_hit, sl_hit = mm_update_after_result(st, "LOSS", payout_pct)
+                sender.send_message(self.uid, mm_build_result_msg(st, "LOSS", pl, old_bal))
+                if tp_hit or sl_hit:
+                    st.mm_enabled = False
 
 # ══════════════ LIVE CHECKER (flexible format parser + readable_time matching) ══════════════
 def clean_int_input(text: str) -> str:
@@ -2808,6 +2861,12 @@ STATE_TREND_FILTER_INPUT = 23
 
 S6_SCORE, S6_MIN_CANDLES = range(26, 28)
 
+# Money Management states (3 values)
+STATE_MM_PROMPT = 28
+STATE_MM_BALANCE = 29
+STATE_MM_TP = 30
+STATE_MM_SL = 31
+
 # Helper to build colored button with premium emoji
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
     if emoji_id:
@@ -2984,6 +3043,280 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_admin":
         sender.send_message(uid, "🤭 Contact @Rohailtrader")
 
+# ══════════════ MONEY MANAGEMENT HELPERS ══════════════
+def mm_calculate_base_amount(balance, sl_amount):
+    """Calculate safe base trade amount considering 3-level martingale."""
+    max_steps = 3
+    total_multiplier = sum(2**i for i in range(max_steps))  # 1+2+4 = 7
+    base = sl_amount / total_multiplier
+    base = math.floor(base * 100) / 100
+    base = max(0.50, base)
+    cap = balance * 0.05
+    base = min(base, cap)
+    return round(base, 2)
+
+def mm_get_trade_amount(st):
+    """Get current trade amount considering consecutive losses (cross-signal martingale)."""
+    multiplier = 2 ** min(st.mm_consecutive_losses, 3)
+    amount = st.mm_base_amount * multiplier
+    max_allowed = st.mm_current_balance * 0.25
+    amount = min(amount, max_allowed)
+    return round(max(0.50, amount), 2)
+
+def mm_build_signal_msg(st, pair, direction):
+    """Build MM info message to send alongside signal."""
+    trade_amt = mm_get_trade_amount(st)
+    mtg_amt = round(trade_amt * 2, 2)
+    pnl_sign = "+" if st.mm_pnl >= 0 else ""
+    pnl_emoji = "📈" if st.mm_pnl >= 0 else "📉"
+    tp_pct = min(100, abs(st.mm_pnl / st.mm_tp * 100)) if st.mm_tp > 0 else 0
+    sl_remaining = st.mm_sl - abs(min(0, st.mm_pnl))
+    step_label = f"Step {st.mm_consecutive_losses + 1}"
+    return (
+        f"💎 𝚂𝙼𝚉𝚇 𝙼𝙾𝙽𝙴𝚈 𝙼𝙰𝙽𝙰𝙶𝙴𝙼𝙴𝙽𝚃\n"
+        f"┏───♡─────────── ⊹˚───┓\n"
+        f"💲 Trade Amount∶— ${trade_amt:.2f}\n"
+        f"💎 Balance∶— ${st.mm_current_balance:.2f}\n"
+        f"🏆 TP Target∶— ${st.mm_tp:.2f} ({tp_pct:.0f}% done)\n"
+        f"🔰 SL Limit∶— ${st.mm_sl:.2f} (${sl_remaining:.2f} left)\n"
+        f"{pnl_emoji} P&L∶— {pnl_sign}${st.mm_pnl:.2f}\n"
+        f"💪 MTG∶— {step_label} (if loss → ${mtg_amt:.2f})\n"
+        f"┗───˚⊹ ─────────♡───┛\n"
+        f"✨ ©OWNER @Rohailtrader ✨"
+    )
+
+def mm_build_result_msg(st, result, profit_loss, old_balance):
+    """Build MM update message after trade result."""
+    pnl_sign = "+" if st.mm_pnl >= 0 else ""
+    pnl_emoji = "📈" if st.mm_pnl >= 0 else "📉"
+    tp_pct = min(100, abs(st.mm_pnl / st.mm_tp * 100)) if st.mm_tp > 0 else 0
+    sl_remaining = st.mm_sl - abs(min(0, st.mm_pnl))
+    next_amt = mm_get_trade_amount(st)
+    pl_sign = "+" if profit_loss >= 0 else ""
+    r_emoji = "✅" if profit_loss >= 0 else "❌"
+
+    msg = (
+        f"💎 𝚂𝙼𝚉𝚇 𝙼𝙼 𝚄𝙿𝙳𝙰𝚃𝙴\n"
+        f"┏───♡─────────── ⊹˚───┓\n"
+        f"{r_emoji} {result} — {pl_sign}${profit_loss:.2f}\n"
+        f"💲 Balance∶— ${st.mm_current_balance:.2f}\n"
+        f"{pnl_emoji} Today P&L∶— {pnl_sign}${st.mm_pnl:.2f}\n"
+        f"🏆 TP∶— ${st.mm_tp:.2f} ({tp_pct:.0f}%)\n"
+        f"🔰 SL∶— ${sl_remaining:.2f} remaining\n"
+        f"💪 Next Trade∶— ${next_amt:.2f}\n"
+        f"┗───˚⊹ ─────────♡───┛\n"
+    )
+
+    if st.mm_pnl >= st.mm_tp:
+        msg += (
+            f"\n🏆🏆🏆 𝚃𝙿 𝙷𝙸𝚃! 🏆🏆🏆\n"
+            f"🔥 Target reached! +${st.mm_pnl:.2f}\n"
+            f"✅ Great trading session!\n"
+            f"💎 Final Balance∶ ${st.mm_current_balance:.2f}\n"
+        )
+    elif abs(min(0, st.mm_pnl)) >= st.mm_sl:
+        msg += (
+            f"\n⚠️⚠️⚠️ 𝚂𝙻 𝙷𝙸𝚃! ⚠️⚠️⚠️\n"
+            f"❌ Stop loss reached! -${abs(st.mm_pnl):.2f}\n"
+            f"🔰 Session stopped to protect capital.\n"
+            f"💎 Final Balance∶ ${st.mm_current_balance:.2f}\n"
+        )
+    elif st.mm_consecutive_losses >= 2:
+        msg += f"⚠️ Warning∶ {st.mm_consecutive_losses} consecutive losses — stay careful!\n"
+
+    msg += f"✨ ©OWNER @Rohailtrader ✨"
+    return msg
+
+def mm_update_after_result(st, result, payout_pct):
+    """Update MM balance after a trade result. Returns (profit_loss, old_balance, tp_hit, sl_hit)."""
+    trade_amt = mm_get_trade_amount(st)
+    old_balance = st.mm_current_balance
+    payout_ratio = payout_pct / 100.0
+
+    if result == "WIN":
+        profit = trade_amt * payout_ratio
+        st.mm_current_balance += profit
+        st.mm_pnl += profit
+        st.mm_consecutive_losses = 0
+        return (profit, old_balance, st.mm_pnl >= st.mm_tp, False)
+    elif result == "MTG WIN":
+        mtg_amt = trade_amt * 2
+        net = (mtg_amt * payout_ratio) - trade_amt
+        st.mm_current_balance += net
+        st.mm_pnl += net
+        st.mm_consecutive_losses = 0
+        return (net, old_balance, st.mm_pnl >= st.mm_tp, False)
+    else:  # LOSS
+        total_loss = trade_amt + (trade_amt * 2)  # first candle + MTG candle
+        st.mm_current_balance -= total_loss
+        st.mm_pnl -= total_loss
+        st.mm_consecutive_losses += 1
+        sl_hit = abs(min(0, st.mm_pnl)) >= st.mm_sl
+        return (-total_loss, old_balance, False, sl_hit)
+
+async def _proceed_with_strategy(query, context, strat, uid, st):
+    """Continue with strategy flow after MM decision."""
+    if strat == 1:
+        text = "✅ Strategy 1 selected. Scanning..."
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        bot = SMZXBot(uid)
+        threading.Thread(target=bot.run_single_signal, daemon=True).start()
+        context.user_data['strategy_active'] = False
+        return ConversationHandler.END
+    elif strat == 2:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes", callback_data="s2_filters_yes"),
+            InlineKeyboardButton("❌ No", callback_data="s2_filters_no")
+        ]])
+        await query.message.reply_text("🔰 Strategy 2: Enable additional filters?", reply_markup=kb)
+        return S2_FILTER_CHOICE
+    elif strat == 3:
+        text = "✅ Strategy 3 selected. Enter min accuracy % (50-100):"
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        return S3_ACCURACY
+    elif strat == 4:
+        text = "✅ Strategy 4 selected. Enter min accuracy % (50-100):"
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        return S4_ACCURACY
+    elif strat == 5:
+        text = "✅ Strategy 5 selected. Enter min score (50-100):"
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        return S5_SCORE
+    elif strat == 6:
+        text = "✅ Strategy 6 selected. Enter minimum confluence score (70‑100):"
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        return S6_SCORE
+    return ConversationHandler.END
+
+async def mm_prompt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle MM Yes/No selection."""
+    query = update.callback_query
+    uid = query.from_user.id
+    await query.answer()
+    data = query.data
+    strat = context.user_data.get('selected_strategy', 1)
+    st = get_state(uid)
+
+    if data == "mm_yes":
+        st.mm_enabled = True
+        text = "💲 Enter your account balance (e.g. 100):"
+        entities = build_custom_emoji_entities(text)
+        await query.edit_message_text(text, entities=entities)
+        return STATE_MM_BALANCE
+    else:  # mm_no
+        st.mm_enabled = False
+        text = f"✅ MM disabled. Proceeding with Strategy {strat}..."
+        entities = build_custom_emoji_entities(text)
+        await query.edit_message_text(text, entities=entities)
+        return await _proceed_with_strategy(query, context, strat, uid, st)
+
+async def mm_balance_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle balance input for MM."""
+    uid = update.effective_user.id
+    st = get_state(uid)
+    text = update.message.text.strip().replace("$", "").replace(",", "")
+    try:
+        balance = float(text)
+        if balance < 1:
+            sender.send_message(uid, "❌ Balance must be at least $1. Enter again:")
+            return STATE_MM_BALANCE
+        st.mm_balance = balance
+        st.mm_current_balance = balance
+        msg = "🏆 Enter your daily Take Profit target (e.g. 15):"
+        entities = build_custom_emoji_entities(msg)
+        await update.message.reply_text(msg, entities=entities)
+        return STATE_MM_TP
+    except ValueError:
+        sender.send_message(uid, "❌ Invalid number. Enter your balance (e.g. 100):")
+        return STATE_MM_BALANCE
+
+async def mm_tp_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle TP input for MM."""
+    uid = update.effective_user.id
+    st = get_state(uid)
+    text = update.message.text.strip().replace("$", "").replace(",", "")
+    try:
+        tp = float(text)
+        if tp <= 0:
+            sender.send_message(uid, "❌ TP must be positive. Enter again:")
+            return STATE_MM_TP
+        st.mm_tp = tp
+        msg = "🔰 Enter your daily Stop Loss limit (e.g. 8):"
+        entities = build_custom_emoji_entities(msg)
+        await update.message.reply_text(msg, entities=entities)
+        return STATE_MM_SL
+    except ValueError:
+        sender.send_message(uid, "❌ Invalid number. Enter your TP target (e.g. 15):")
+        return STATE_MM_TP
+
+async def mm_sl_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle SL input for MM — then proceed to strategy."""
+    uid = update.effective_user.id
+    st = get_state(uid)
+    strat = context.user_data.get('selected_strategy', 1)
+    text = update.message.text.strip().replace("$", "").replace(",", "")
+    try:
+        sl = float(text)
+        if sl <= 0:
+            sender.send_message(uid, "❌ SL must be positive. Enter again:")
+            return STATE_MM_SL
+        st.mm_sl = sl
+        st.mm_pnl = 0.0
+        st.mm_consecutive_losses = 0
+        st.mm_base_amount = mm_calculate_base_amount(st.mm_balance, st.mm_sl)
+        trade_amt = mm_get_trade_amount(st)
+        max_steps = 3
+        summary = (
+            f"💎 𝚂𝙼𝚉𝚇 𝙼𝙼 𝙰𝙲𝚃𝙸𝚅𝙰𝚃𝙴𝙳\n"
+            f"┏───♡─────────── ⊹˚───┓\n"
+            f"💲 Balance∶— ${st.mm_balance:.2f}\n"
+            f"🏆 TP Target∶— ${st.mm_tp:.2f}\n"
+            f"🔰 SL Limit∶— ${st.mm_sl:.2f}\n"
+            f"💪 Trade Amount∶— ${trade_amt:.2f}\n"
+            f"📊 Max MTG Steps∶— {max_steps}\n"
+            f"🔥 Risk per signal∶— ${trade_amt * 7:.2f} max\n"
+            f"┗───˚⊹ ─────────♡───┛\n\n"
+            f"✅ Proceeding with Strategy {strat}...\n"
+            f"✨ ©OWNER @Rohailtrader ✨"
+        )
+        sender.send_message(uid, summary)
+        # Now proceed with the original strategy flow
+        # We use a fake query-like approach — send via sender and return next state
+        if strat == 1:
+            bot = SMZXBot(uid)
+            threading.Thread(target=bot.run_single_signal, daemon=True).start()
+            context.user_data['strategy_active'] = False
+            return ConversationHandler.END
+        elif strat == 2:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Yes", callback_data="s2_filters_yes"),
+                InlineKeyboardButton("❌ No", callback_data="s2_filters_no")
+            ]])
+            await update.message.reply_text("🔰 Strategy 2: Enable additional filters?", reply_markup=kb)
+            return S2_FILTER_CHOICE
+        elif strat == 3:
+            sender.send_message(uid, "✅ Strategy 3 — Enter min accuracy % (50-100):")
+            return S3_ACCURACY
+        elif strat == 4:
+            sender.send_message(uid, "✅ Strategy 4 — Enter min accuracy % (50-100):")
+            return S4_ACCURACY
+        elif strat == 5:
+            sender.send_message(uid, "✅ Strategy 5 — Enter min score (50-100):")
+            return S5_SCORE
+        elif strat == 6:
+            sender.send_message(uid, "✅ Strategy 6 — Enter minimum confluence score (70‑100):")
+            return S6_SCORE
+        return ConversationHandler.END
+    except ValueError:
+        sender.send_message(uid, "❌ Invalid number. Enter your SL limit (e.g. 8):")
+        return STATE_MM_SL
+
+# ── Strategy selection (now shows MM prompt first) ──
 async def strategy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -3000,42 +3333,23 @@ async def strategy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['uid'] = uid
     context.user_data['strategy_active'] = True
     context.user_data['state'] = None
+    context.user_data['selected_strategy'] = strat
 
-    if strat == 1:
-        text = "✅ Strategy 1 selected. Scanning..."
-        entities = build_custom_emoji_entities(text)
-        await query.edit_message_text(text, entities=entities)
-        bot = SMZXBot(uid)
-        threading.Thread(target=bot.run_single_signal, daemon=True).start()
-        context.user_data['strategy_active'] = False
-        return ConversationHandler.END
-    elif strat == 2:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Yes", callback_data="s2_filters_yes"),
-            InlineKeyboardButton("❌ No", callback_data="s2_filters_no")
-        ]])
-        await query.message.reply_text("🔰 Strategy 2: Enable additional filters?", reply_markup=kb)
-        return S2_FILTER_CHOICE
-    elif strat == 3:
-        text = "✅ Strategy 3 selected. Enter min accuracy % (50-100):"
-        entities = build_custom_emoji_entities(text)
-        await query.edit_message_text(text, entities=entities)
-        return S3_ACCURACY
-    elif strat == 4:
-        text = "✅ Strategy 4 selected. Enter min accuracy % (50-100):"
-        entities = build_custom_emoji_entities(text)
-        await query.edit_message_text(text, entities=entities)
-        return S4_ACCURACY
-    elif strat == 5:
-        text = "✅ Strategy 5 selected. Enter min score (50-100):"
-        entities = build_custom_emoji_entities(text)
-        await query.edit_message_text(text, entities=entities)
-        return S5_SCORE
-    elif strat == 6:
-        text = "✅ Strategy 6 selected. Enter minimum confluence score (70‑100):"
-        entities = build_custom_emoji_entities(text)
-        await query.edit_message_text(text, entities=entities)
-        return S6_SCORE
+    # Show MM prompt before proceeding
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes", callback_data="mm_yes"),
+        InlineKeyboardButton("❌ No", callback_data="mm_no")
+    ]])
+    text = (
+        f"💎 𝚂𝙼𝚉𝚇 𝙼𝙾𝙽𝙴𝚈 𝙼𝙰𝙽𝙰𝙶𝙴𝙼𝙴𝙽𝚃\n\n"
+        f"🔰 Enable Money Management for ST{strat}?\n"
+        f"📊 Track balance, TP, SL & smart martingale\n"
+        f"💪 Auto-calculate trade amounts\n\n"
+        f"🤖 Choose below:"
+    )
+    entities = build_custom_emoji_entities(text)
+    await query.message.reply_text(text, entities=entities, reply_markup=kb)
+    return STATE_MM_PROMPT
 
 async def checker_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3277,9 +3591,12 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st.running = False
     st.ai_mode = False
 
-    # ✅ Reset stats and history
+    # ✅ Reset stats, history, and MM
     st.stats = {"wins": 0, "losses": 0}
     st.signal_history = []
+    st.mm_enabled = False
+    st.mm_pnl = 0.0
+    st.mm_consecutive_losses = 0
 
     sender.send_message(uid, "🤖 Stopping. Returning to main menu. Use /start to see options.")
 
@@ -3567,6 +3884,10 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(strategy_callback, pattern=r"^strat_")],
         states={
+            STATE_MM_PROMPT: [CallbackQueryHandler(mm_prompt_callback, pattern=r"^mm_")],
+            STATE_MM_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mm_balance_received)],
+            STATE_MM_TP: [MessageHandler(filters.TEXT & ~filters.COMMAND, mm_tp_received)],
+            STATE_MM_SL: [MessageHandler(filters.TEXT & ~filters.COMMAND, mm_sl_received)],
             S2_FILTER_CHOICE: [CallbackQueryHandler(s2_filter_choice, pattern=r"^s2_filters_")],
             S2_FILTER_TOGGLE: [CallbackQueryHandler(s2_filter_toggle, pattern=r"^s2_")],
             S2_ACCURACY: [MessageHandler(filters.TEXT & ~filters.COMMAND, s2_accuracy_received)],
