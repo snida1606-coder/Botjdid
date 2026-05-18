@@ -61,6 +61,7 @@ class UserState:
         self.strategy5_min_score = 80
         self.strategy6_min_score = 85          # minimum confluence score for Strategy 6
         self.strategy6_min_candles = 50        # minimum candles required before analysis
+        self.ai_mode = False                   # AI Mode flag
 
 user_states: Dict[int, UserState] = {}
 def get_state(uid: int) -> UserState:
@@ -1028,6 +1029,350 @@ def analyze_strategy6(candles, min_score=20, min_candles=10):
     entry_dt = datetime.now(timezone.utc) + timedelta(hours=5)
     entry_dt = entry_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
     return direction, entry_dt, conf
+
+# ══════════════ AI MODE — Multi-strategy consensus engine ══════════════
+def _ai_analyze_pair(pair, candles, payout_num):
+    """Run all 6 strategies on a single pair, return list of hits."""
+    hits = []
+    s2_filters = Strategy2Filters()
+    analyzers = [
+        (1, lambda c: analyze_strategy1(c, 65)),
+        (2, lambda c: analyze_strategy2(c, s2_filters)),
+        (3, lambda c: analyze_strategy3(c, 65, 20)),
+        (4, lambda c: analyze_strategy4(c, 55)),
+        (5, lambda c: analyze_strategy5(c, 60)),
+        (6, lambda c: analyze_strategy6(c, 20, 10)),
+    ]
+    for strat_id, analyzer in analyzers:
+        try:
+            direction, entry_dt, score = analyzer(candles)
+            if direction and score:
+                hits.append({
+                    'strategy': strat_id,
+                    'direction': direction,
+                    'entry_dt': entry_dt,
+                    'score': score,
+                    'pair': pair,
+                    'payout': payout_num,
+                })
+        except Exception:
+            pass
+    return hits
+
+def _ai_rank_signals(all_hits):
+    """Rank signals by multi-strategy consensus and confidence."""
+    grouped = {}
+    for h in all_hits:
+        key = (h['pair'], h['direction'])
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(h)
+
+    ranked = []
+    for (pair, direction), strats in grouped.items():
+        n_agree = len(strats)
+        avg_score = sum(s['score'] for s in strats) / n_agree
+        best = max(strats, key=lambda s: s['score'])
+        consensus_bonus = (n_agree - 1) * 8
+        final_score = min(99, avg_score + consensus_bonus)
+        ranked.append({
+            'pair': pair,
+            'direction': direction,
+            'final_score': round(final_score, 1),
+            'avg_score': round(avg_score, 1),
+            'best_strategy': best['strategy'],
+            'best_score': round(best['score'], 1),
+            'n_strategies': n_agree,
+            'strategies': sorted([s['strategy'] for s in strats]),
+            'entry_dt': best['entry_dt'],
+            'payout': best['payout'],
+        })
+    ranked.sort(key=lambda x: x['final_score'], reverse=True)
+    return ranked
+
+def _ai_build_analysis_msg(ranked, scan_time_sec):
+    """Build premium-emoji-rich analysis message."""
+    if not ranked:
+        return (
+            "❀° ┄────────=─────────╮\n"
+            "   🤖 𝙰𝙸 𝙼𝙾𝙳𝙴 — 𝚂𝙼𝚉𝚇 🤖\n"
+            "╰────────=───=─────┄ °❀\n\n"
+            "❌ No signals found across all strategies.\n"
+            "⏳ Try again in 1 minute.\n"
+        )
+
+    top = ranked[0]
+    strat_names = {1:"RSI",2:"EMA",3:"WR",4:"ADX",5:"Confluence",6:"IROF"}
+    strat_list = " + ".join(strat_names.get(s, f"ST{s}") for s in top['strategies'])
+    dir_emoji = "📈" if top['direction'] == "CALL" else "📉"
+    stars = "⭐" * min(top['n_strategies'], 6)
+
+    msg = (
+        f"❀° ┄────────=─────────╮\n"
+        f"   🤖 𝙰𝙸 𝙼𝙾𝙳𝙴 — 𝚂𝙼𝚉𝚇 🤖\n"
+        f"╰────────=───=─────┄ °❀\n"
+        f"┏───♡─────────── ⊹˚───┓\n"
+        f"📊 Pair∶— {fancy_font(top['pair'])}\n"
+        f"{dir_emoji} Direction∶— {fancy_font(top['direction'])}\n"
+        f"💎 AI Score∶— {fancy_font(str(top['final_score']) + '%')}\n"
+        f"⏰ Entry∶— {fancy_font(top['entry_dt'].strftime('%H:%M'))}\n"
+        f"💲 Payout∶— {fancy_font(str(top['payout']) + '%')}\n"
+        f"┗───˚⊹ ─────────♡───┛\n\n"
+        f"🔥 Strategy Consensus\n"
+        f"✅ {top['n_strategies']}/6 strategies agree {stars}\n"
+        f"🔰 Strategies∶ {fancy_font(strat_list)}\n"
+        f"🏆 Best∶ ST{top['best_strategy']} ({top['best_score']}%)\n"
+        f"📊 Average∶ {top['avg_score']}%\n\n"
+    )
+
+    if len(ranked) > 1:
+        msg += "💪 Other Signals Found\n"
+        for i, r in enumerate(ranked[1:5], 2):
+            s_list = ",".join(str(s) for s in r['strategies'])
+            r_emoji = "📈" if r['direction'] == "CALL" else "📉"
+            msg += f"  {r_emoji} #{i} {r['pair']} {r['direction']} {r['final_score']}% (ST{s_list})\n"
+        msg += "\n"
+
+    msg += (
+        f"⏳ Scan time∶ {scan_time_sec:.1f}s | {len(ranked)} signals found\n"
+        f"✨ ©OWNER @Rohailtrader ✨"
+    )
+    return msg
+
+def _ai_build_result_msg(pair, direction, result, score, n_strats, wins, losses):
+    """Build premium-emoji result message for AI Mode."""
+    if result == "WIN":
+        r_emoji = "✅"
+        r_text = "WIN"
+    elif result == "MTG WIN":
+        r_emoji = "✅"
+        r_text = "MTG WIN"
+    else:
+        r_emoji = "❌"
+        r_text = "LOSS"
+    total = wins + losses
+    wr = (wins / total * 100) if total > 0 else 0
+    return (
+        f"❀° ┄────────=─────────╮\n"
+        f"   🤖 𝙰𝙸 𝚁𝙴𝚂𝚄𝙻𝚃 — 𝚂𝙼𝚉𝚇 🤖\n"
+        f"╰────────=───=─────┄ °❀\n"
+        f"┏───♡─────────── ⊹˚───┓\n"
+        f"📊 Pair∶— {fancy_font(pair)}\n"
+        f"{r_emoji} Result∶— {fancy_font(r_text)}\n"
+        f"💎 AI Score∶— {fancy_font(str(score) + '%')}\n"
+        f"🏆 Win Rate∶— {fancy_font(f'{wr:.0f}%')} ({wins}W/{losses}L)\n"
+        f"🔰 Strategies∶ {n_strats}/6 agreed\n"
+        f"┗───˚⊹ ─────────♡───┛\n\n"
+        f"✨ ©OWNER @Rohailtrader ✨"
+    )
+
+def run_ai_mode(uid):
+    """AI Mode: scan all pairs with all 6 strategies, pick the best signal."""
+    st = get_state(uid)
+    st.running = True
+    st.stop_requested = False
+
+    progress_msg = sender.send_message(uid,
+        "🤖 AI Mode activated!\n"
+        "⏳ Scanning all pairs with 6 strategies...\n"
+        "💎 Finding the best signal for you...\n\n"
+        f"{progress_bar_text(0)}"
+    )
+    if not progress_msg:
+        st.running = False
+        return
+    progress_id = progress_msg.id
+
+    bot = SMZXBot(uid)
+    pairs = bot.pairs
+    all_hits = []
+    scan_start = time.time()
+
+    for idx, pair in enumerate(pairs):
+        if st.stop_requested:
+            break
+        pct = int((idx + 1) / len(pairs) * 100)
+        sender.edit_message(uid, progress_id,
+            f"🤖 AI Mode — Scanning...\n"
+            f"📊 Analyzing {pair}\n"
+            f"🔥 Running ST1-6 analysis\n"
+            f"✅ {len(all_hits)} signals found so far\n\n"
+            f"{progress_bar_text(pct)}"
+        )
+        candles, price, payout = bot.fetch_data(pair, limit=600)
+        if not candles:
+            continue
+        try:
+            payout_num = int(payout) if payout != "!" else 77
+        except (ValueError, TypeError):
+            payout_num = 0
+        if bot.market_type == "OTC" and payout_num < 77:
+            continue
+        if pair in st.last_loss:
+            now = datetime.now(timezone.utc) + timedelta(hours=5)
+            if (now - st.last_loss[pair]).total_seconds() < st.loss_cooldown_minutes * 60:
+                continue
+        hits = _ai_analyze_pair(pair, candles, payout_num)
+        all_hits.extend(hits)
+
+    scan_time = time.time() - scan_start
+
+    if st.stop_requested:
+        sender.edit_message(uid, progress_id, "🤖 AI Mode stopped.")
+        st.running = False
+        return
+
+    ranked = _ai_rank_signals(all_hits)
+
+    if not ranked:
+        sender.edit_message(uid, progress_id,
+            "🤖 AI Mode — Scan complete\n"
+            "❌ No valid signals found.\n"
+            f"⏳ Scanned {len(pairs)} pairs in {scan_time:.1f}s\n\n"
+            "Try again in 1 minute or use /stop to return."
+        )
+        st.running = False
+        return
+
+    top = ranked[0]
+    analysis_msg = _ai_build_analysis_msg(ranked, scan_time)
+    sender.edit_message(uid, progress_id,
+        f"🤖 AI Mode — ✅ Best signal found!\n"
+        f"📊 {top['pair']} → {top['direction']}\n"
+        f"💎 AI Score: {top['final_score']}% ({top['n_strategies']}/6 strategies)\n\n"
+        "Sending chart..."
+    )
+
+    candles, price, payout = bot.fetch_data(top['pair'], limit=600)
+    if not candles:
+        sender.send_message(uid, "❌ Failed to fetch chart data. Try again.")
+        st.running = False
+        return
+
+    entry_t = top['entry_dt'].strftime("%H:%M")
+    chart_path = draw_neon_chart(candles, top['pair'], entry_t, top['direction'], top['payout'],
+                                confidence=top['final_score'],
+                                wins=st.stats['wins'], losses=st.stats['losses'],
+                                strategy=top['best_strategy'], martingale_steps=1,
+                                signal_history=st.signal_history)
+    if chart_path and os.path.exists(chart_path):
+        sender.send_file(uid, chart_path, analysis_msg)
+        try:
+            os.remove(chart_path)
+        except Exception:
+            pass
+    else:
+        sender.send_message(uid, analysis_msg)
+
+    entry_dt_utc5 = top['entry_dt']
+    direction = top['direction']
+    pair = top['pair']
+    payout_str = str(top['payout'])
+
+    close_time_1 = entry_dt_utc5 + timedelta(minutes=1)
+    bot.sleep_until(close_time_1)
+    if st.stop_requested:
+        st.running = False
+        return
+    candles, _, _ = bot.fetch_data(pair, limit=750)
+    if not candles:
+        st.running = False
+        return
+    first = bot.get_candle_at_time(candles, entry_dt_utc5)
+    if not first:
+        st.running = False
+        return
+
+    win1 = (first['close'] > first['open']) if direction == "CALL" else (first['close'] < first['open'])
+    trade_type = "NON-MTG"
+    st.signal_history.append({
+        'pair': pair, 'direction': direction,
+        'time': entry_dt_utc5.strftime('%H:%M'),
+        'result': "WIN" if win1 else "LOSS",
+        'type': trade_type
+    })
+    if not win1:
+        st.last_loss[pair] = datetime.now(timezone.utc) + timedelta(hours=5)
+    if win1:
+        st.stats['wins'] += 1
+        result_msg = _ai_build_result_msg(pair, direction, "WIN",
+                                          top['final_score'], top['n_strategies'],
+                                          st.stats['wins'], st.stats['losses'])
+        chart_path = draw_result_chart(candles, pair, top['payout'], "WIN",
+                                       first, wins=st.stats['wins'], losses=st.stats['losses'],
+                                       strategy=top['best_strategy'], direction=direction,
+                                       entry_time_str=entry_t,
+                                       signal_history=st.signal_history)
+        if chart_path and os.path.exists(chart_path):
+            sender.send_file(uid, chart_path, result_msg)
+            try:
+                os.remove(chart_path)
+            except Exception:
+                pass
+        else:
+            sender.send_message(uid, result_msg)
+        sender.send_message(uid,
+            "🤖 AI Mode — Use /continue for next AI signal, or /stop to return.")
+        st.running = False
+        return
+
+    close_time_2 = entry_dt_utc5 + timedelta(minutes=2)
+    bot.sleep_until(close_time_2)
+    if st.stop_requested:
+        st.running = False
+        return
+    candles2, _, _ = bot.fetch_data(pair, limit=750)
+    if not candles2:
+        st.running = False
+        return
+    second = bot.get_candle_at_time(candles2, entry_dt_utc5 + timedelta(minutes=1))
+    if not second:
+        st.running = False
+        return
+    win2 = (second['close'] > second['open']) if direction == "CALL" else (second['close'] < second['open'])
+    if win2:
+        st.signal_history[-1]['result'] = "WIN"
+        st.signal_history[-1]['type'] = "MTG"
+        st.stats['wins'] += 1
+        result_msg = _ai_build_result_msg(pair, direction, "MTG WIN",
+                                          top['final_score'], top['n_strategies'],
+                                          st.stats['wins'], st.stats['losses'])
+        chart_path = draw_result_chart(candles2, pair, top['payout'], "MTG WIN",
+                                       first, second, wins=st.stats['wins'], losses=st.stats['losses'],
+                                       strategy=top['best_strategy'], direction=direction,
+                                       entry_time_str=entry_t,
+                                       signal_history=st.signal_history)
+        if chart_path and os.path.exists(chart_path):
+            sender.send_file(uid, chart_path, result_msg)
+            try:
+                os.remove(chart_path)
+            except Exception:
+                pass
+        else:
+            sender.send_message(uid, result_msg)
+    else:
+        st.stats['losses'] += 1
+        result_msg = _ai_build_result_msg(pair, direction, "LOSS",
+                                          top['final_score'], top['n_strategies'],
+                                          st.stats['wins'], st.stats['losses'])
+        chart_path = draw_result_chart(candles2, pair, top['payout'], "LOSS",
+                                       first, wins=st.stats['wins'], losses=st.stats['losses'],
+                                       strategy=top['best_strategy'], direction=direction,
+                                       entry_time_str=entry_t,
+                                       signal_history=st.signal_history)
+        if chart_path and os.path.exists(chart_path):
+            sender.send_file(uid, chart_path, result_msg)
+            try:
+                os.remove(chart_path)
+            except Exception:
+                pass
+        else:
+            sender.send_message(uid, result_msg)
+
+    sender.send_message(uid,
+        "🤖 AI Mode — Use /continue for next AI signal, or /stop to return.")
+    st.running = False
+
 
 # ══════════════ CHART DRAWING (SMZX PRO) ══════════════
 STRATEGY_NAMES = {1:"RSI basic",2:"EMA filtered",3:"WR divergence",
@@ -2490,25 +2835,26 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 Assalamualaikum @{username} 👋\n\n"
         f"🔥 Welcome to SMZXV4.3 AI\n\n"
         f"Quick Guide\n"
-        f"1. 📊 Start Trading – live chart analysis\n"
-        f"2. 🐶 Signal Checker – verify past signals\n"
-        f"3. 🐶 Future Signals – next‑hour signals\n"
-        f"4. 🏆 Backtest – multi‑day win‑rate test\n"
-        f"5. 🐶 UTC Converter – timezone changer\n"
-        f"6. 🐶 Pair Payout% – live payout list\n"
-        f"7. 🐶 Market Trend – Current market direction\n"
-        f"8. 🐶 Candle Colors – last 6 candle colours\n"
-        f"9. 🐶Text Formatter – reformat signal lists\n"
-        f"10. 🐶 Font Changer – apply text styles\n"
-        f"11. 📺 Trend Filter – Ai trend filter\n"
-        f"12. 🤭 Help – contact support\n\n"
+        f"1. 🤖 AI Mode – auto best signal (6 strategies)\n"
+        f"2. 📊 Start Trading – live chart analysis\n"
+        f"3. 🐶 Signal Checker – verify past signals\n"
+        f"4. 🐶 Future Signals – next‑hour signals\n"
+        f"5. 🏆 Backtest – multi‑day win‑rate test\n"
+        f"6. 🐶 UTC Converter – timezone changer\n"
+        f"7. 🐶 Pair Payout% – live payout list\n"
+        f"8. 🐶 Market Trend – Current market direction\n"
+        f"9. 🐶 Candle Colors – last 6 candle colours\n"
+        f"10. 🐶Text Formatter – reformat signal lists\n"
+        f"11. 🐶 Font Changer – apply text styles\n"
+        f"12. 📺 Trend Filter – Ai trend filter\n"
+        f"13. 🤭 Help – contact support\n\n"
         f"💎 Choose an option below to continue.\n\n"
         f"©OWNER @Rohailtrader ✨"
     )
 
     # Bold entities for feature names and key words
     bold_words = [
-        "Start Trading", "Signal Checker", "Future Signals", "Backtest",
+        "AI Mode", "Start Trading", "Signal Checker", "Future Signals", "Backtest",
         "UTC Converter", "Pair Payout%", "Market Trend", "Candle Colors",
         "Text Formatter", "Font Changer", "Trend Filter", "Help",
         "SMZXV4.3"   # also bold the version number
@@ -2527,6 +2873,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     buttons = [
+        [colored_button(" 🤖 AI Mode", "menu_ai_mode", KeyboardButtonStyle.SUCCESS, "5314391089514291948")],
         [colored_button(" Start Trading", "menu_analysis", KeyboardButtonStyle.SUCCESS, "6145248943807667330"),
          colored_button(" Signal Checker", "menu_checker", KeyboardButtonStyle.PRIMARY, "6145553439809084250")],
         [colored_button(" Future Signals", "menu_futuresignal", KeyboardButtonStyle.PRIMARY, "6062153953833917531"),
@@ -2556,7 +2903,27 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     data = query.data
-    if data == "menu_analysis":
+    if data == "menu_ai_mode":
+        st = get_state(uid)
+        if st.running:
+            text = "⏳ Already running a signal. Use /stop first."
+            entities = build_custom_emoji_entities(text)
+            await query.message.reply_text(text, entities=entities)
+            return
+        st.ai_mode = True
+        text = (
+            "🤖 𝙰𝙸 𝙼𝙾𝙳𝙴 𝙰𝙲𝚃𝙸𝚅𝙰𝚃𝙴𝙳\n\n"
+            "💎 Scanning all pairs with 6 strategies...\n"
+            "🔥 Multi-strategy consensus engine\n"
+            "📊 Auto-selecting best signal\n"
+            "⭐ Finding highest confidence trade\n\n"
+            "⏳ Please wait..."
+        )
+        entities = build_custom_emoji_entities(text)
+        await query.message.reply_text(text, entities=entities)
+        threading.Thread(target=run_ai_mode, args=(uid,), daemon=True).start()
+        return
+    elif data == "menu_analysis":
         await query.answer()
         buttons = [
             [colored_button(" Strategy 1", "strat_1", KeyboardButtonStyle.PRIMARY)],
@@ -2885,9 +3252,13 @@ async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if st.running:
         await update.message.reply_text("Already running a signal. Wait for it to finish.")
         return
-    bot = SMZXBot(uid)
-    threading.Thread(target=bot.run_single_signal, daemon=True).start()
-    sender.send_message(uid, "Continuing with next signal...")
+    if st.ai_mode:
+        threading.Thread(target=run_ai_mode, args=(uid,), daemon=True).start()
+        sender.send_message(uid, "🤖 AI Mode — Scanning for next best signal...")
+    else:
+        bot = SMZXBot(uid)
+        threading.Thread(target=bot.run_single_signal, daemon=True).start()
+        sender.send_message(uid, "Continuing with next signal...")
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -2898,12 +3269,13 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = get_state(uid)
     st.stop_requested = True
     st.running = False
+    st.ai_mode = False
 
     # ✅ Reset stats and history
     st.stats = {"wins": 0, "losses": 0}
     st.signal_history = []
 
-    sender.send_message(uid, "Stopping. Returning to main menu. Use /start to see options.")
+    sender.send_message(uid, "🤖 Stopping. Returning to main menu. Use /start to see options.")
 
 # ══════════════ GLOBAL TEXT HANDLER (Checker, Future Signal, Backtest, New Modes) ══════════════
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
