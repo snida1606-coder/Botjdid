@@ -1029,7 +1029,10 @@ def analyze_strategy6(candles, min_score=20, min_candles=10):
     entry_dt = entry_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
     return direction, entry_dt, conf
 
-# ══════════════ CHART DRAWING ══════════════
+# ══════════════ CHART DRAWING (SMZX PRO) ══════════════
+STRATEGY_NAMES = {1:"RSI basic",2:"EMA filtered",3:"WR divergence",
+                  4:"ADX stochastic",5:"ultra accurate",6:"IROF pro"}
+
 def get_system_font(size, bold=False):
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -1041,154 +1044,355 @@ def get_system_font(size, bold=False):
     try: return ImageFont.truetype("arial.ttf", size) if os.path.exists("arial.ttf") else ImageFont.load_default()
     except: return ImageFont.load_default()
 
-def create_gradient_background(w, h, top_color, bottom_color):
-    base = Image.new('RGB', (w, h), top_color)
-    overlay = Image.new('RGB', (w, h), bottom_color)
-    mask = Image.new('L', (w, h))
-    for y in range(h): mask.paste(int(255*(y/h)), (0, y, w, y+1))
-    base.paste(overlay, (0,0), mask)
-    return base
+def _fmt_pair(pair):
+    return pair.replace("_OTC"," (OTC)").replace("_"," ")
 
-def draw_sharp_candle(draw, x, candle_w, open_p, high_p, low_p, close_p, price_to_y_func):
-    body_top = price_to_y_func(max(open_p, close_p))
-    body_bottom = price_to_y_func(min(open_p, close_p))
-    wick_high = price_to_y_func(high_p)
-    wick_low = price_to_y_func(low_p)
-    if close_p >= open_p:
-        body_color = (0,180,0); border_color = (120,255,120); wick_color = (150,230,150)
-    else:
-        body_color = (200,20,20); border_color = (255,130,130); wick_color = (230,150,150)
-    draw.line([(x+candle_w//2, wick_high), (x+candle_w//2, wick_low)], fill=wick_color, width=2)
-    if body_top == body_bottom:
-        draw.line([(x, body_top), (x+candle_w, body_top)], fill=body_color, width=3)
-    else:
-        draw.rectangle([x-1, body_top-1, x+candle_w+1, body_bottom+1], outline=border_color, width=1)
-        draw.rectangle([x, body_top, x+candle_w, body_bottom], fill=body_color)
+def _chart_base(W, H):
+    C = dict(
+        BG=(13,17,23), SIDEBAR_BG=(15,19,27), HEADER_BG=(10,13,18),
+        CANDLE_GREEN=(0,210,130), CANDLE_RED=(234,57,67),
+        WICK_GREEN=(0,170,105), WICK_RED=(200,50,58),
+        EMA9=(0,215,255), EMA21=(105,155,255), EMA56=(155,115,215),
+        GRID=(28,36,48), TXT_GRAY=(120,130,148), TXT_WHITE=(228,233,242),
+        GREEN=(0,235,110), RED=(255,70,90), CYAN=(0,215,255),
+        YGREEN=(175,255,55), SEC_HDR=(95,108,128), SB_BORDER=(35,48,62),
+        BRAND_CYAN=(0,225,255),
+    )
+    img = Image.new('RGB', (W, H), C['BG'])
+    return img, C
 
-def draw_neon_chart(candles, pair, trade_time, direction, payout):
-    w, h = 1000, 600; right_pad = 100; volume_height = 60; chart_bottom = h - volume_height - 30
-    img = create_gradient_background(w, h, (5,8,20), (15,20,40)); draw = ImageDraw.Draw(img)
-    watermark_font = get_system_font(90, bold=True)
-    try: tw = draw.textlength("SMZX 4.3", font=watermark_font)
-    except: tw = 450
-    watermark_x = (w-tw)//2; watermark_y = (h-100)//2
-    draw.text((watermark_x+3, watermark_y+3), "SMZX 4.3", fill=(15,15,35), font=watermark_font)
-    draw.text((watermark_x, watermark_y), "SMZX 4.3", fill=(40,40,70), font=watermark_font)
-    font_large = get_system_font(24, bold=True); font_med = get_system_font(16, bold=True); font_small = get_system_font(12); font_price = get_system_font(13, bold=True)
-    header_text = "SMZX PREMIUM CHART"
-    header_w = draw.textlength(header_text, font=font_large)
-    draw.text(((w-header_w)//2+2, 14), header_text, fill=(0,0,0), font=font_large)
-    draw.text(((w-header_w)//2, 12), header_text, fill=(255,255,255), font=font_large)
-    sub_text = f"{pair}  |  PAYOUT: {payout}%  |  {direction} SIGNAL"
-    sub_w = draw.textlength(sub_text, font=font_med)
-    draw.text(((w-sub_w)//2+1, 42), sub_text, fill=(0,0,0), font=font_med)
-    draw.text(((w-sub_w)//2, 40), sub_text, fill=(220,220,255), font=font_med)
-    data = candles[-70:]
-    if len(data) < 70: data = candles[-len(data):]
-    highs=[c['high'] for c in data]; lows=[c['low'] for c in data]; closes=[c['close'] for c in data]
-    mn,mx=min(lows),max(highs); diff=(mx-mn) or 0.0001; padding=diff*0.05; mn-=padding; mx+=padding; diff=mx-mn
-    def price_to_y(p): return chart_bottom - int(((p-mn)/diff)*(chart_bottom-60))
-    recent=candles[-30:]; support=min(c['low'] for c in recent); resistance=max(c['high'] for c in recent)
-    zone_alpha=40
-    support_y=price_to_y(support); support_zone=Image.new('RGBA',(w-right_pad+20, chart_bottom-support_y+10), (0,150,0,zone_alpha)); img.paste(support_zone,(10,support_y-5),support_zone)
-    resistance_y=price_to_y(resistance); resistance_zone=Image.new('RGBA',(w-right_pad+20, resistance_y-10), (150,0,0,zone_alpha)); img.paste(resistance_zone,(10,10),resistance_zone)
-    grid_color=(35,35,65); label_color=(200,200,220)
-    for i in range(11): 
-        y=50+i*(chart_bottom-50)//10; price_level=mx-(i/10)*(mx-mn)
-        draw.line([(10,y),(w-right_pad,y)], fill=grid_color, width=1)
-        draw.text((w-right_pad+5,y-6), f"{price_level:.5f}", fill=label_color, font=font_small)
-    candle_area_width=w-right_pad-20; cw = max(4, candle_area_width // len(data))
-    spacing=max(0, cw-6); candle_w=min(cw-spacing, 8)
-    for i, c in enumerate(data):
-        x=15+i*cw+spacing//2; draw_sharp_candle(draw, x, candle_w, c['open'], c['high'], c['low'], c['close'], price_to_y)
-    volumes=[c.get('volume',1) for c in data]; max_vol=max(volumes) if volumes else 1; vol_bottom=h-15
-    for i, vol in enumerate(volumes):
-        x=15+i*cw+spacing//2; bar_height=int((vol/max_vol)*volume_height) if max_vol>0 else 5
-        color=(0,120,0) if data[i]['close']>=data[i]['open'] else (140,0,0)
-        draw.rectangle([x, vol_bottom-bar_height, x+candle_w, vol_bottom], fill=color)
-    draw.line([(10,support_y),(w-right_pad, support_y)], fill=(0,220,0), width=2)
-    draw.text((w-right_pad+5, support_y-10), f"S: {support:.5f}", fill=(0,220,0), font=font_small)
-    draw.line([(10,resistance_y),(w-right_pad, resistance_y)], fill=(220,0,0), width=2)
-    draw.text((w-right_pad+5, resistance_y-10), f"R: {resistance:.5f}", fill=(220,0,0), font=font_small)
-    current_price=closes[-1]; y_price=price_to_y(current_price)
-    for px in range(10, w-right_pad, 15): draw.line([(px, y_price),(px+8, y_price)], fill=(255,240,0), width=2)
-    price_text=f"{current_price:.5f}"; text_w=draw.textlength(price_text, font=font_price)+12
-    tag_x=w-right_pad-text_w-5; tag_y=y_price-12
-    tag_bg=Image.new('RGBA', (int(text_w),24), (20,25,50,200)); img.paste(tag_bg, (int(tag_x),int(tag_y)), tag_bg)
-    draw.text((tag_x+6,tag_y+4), price_text, fill=(255,240,0), font=font_price)
-    last_x=15+(len(data)-1)*cw+spacing//2+candle_w//2; arrow_size=20
-    if direction=="CALL":
-        arrow_y=price_to_y(data[-1]['high'])-30
-        points=[(last_x, arrow_y-arrow_size),(last_x-arrow_size//2,arrow_y),(last_x-arrow_size//4,arrow_y),(last_x-arrow_size//4,arrow_y+arrow_size//2),(last_x+arrow_size//4,arrow_y+arrow_size//2),(last_x+arrow_size//4,arrow_y),(last_x+arrow_size//2,arrow_y)]
-        draw.polygon(points, fill=(0,255,0))
+def _draw_pro_body(img, draw, candles, pair, W, H, C, wins, losses, strategy, martingale_steps,
+                   header_extra="", sidebar_top_section=None, entry_idx=None, second_idx=None,
+                   result_type=None, direction=None, confidence=80, entry_time_str=""):
+    SIDEBAR_W = 310; HEADER_H = 44; CHART_LEFT = 80
+    CHART_RIGHT = W - SIDEBAR_W - 20; CHART_TOP = 70; CHART_BOTTOM = H - 225
+    EMA_LEGEND_Y = CHART_BOTTOM + 15; VOLUME_TOP = CHART_BOTTOM + 45
+    VOLUME_BOTTOM = H - 40; TIME_Y = H - 30
+
+    f_header = get_system_font(18, True); f_price = get_system_font(13)
+    f_small = get_system_font(11); f_sidebar_ttl = get_system_font(13)
+    f_sidebar_lbl = get_system_font(14); f_sidebar_val = get_system_font(14, True)
+    f_ema = get_system_font(12, True); f_vol = get_system_font(12)
+    f_time = get_system_font(11); f_brand = get_system_font(22, True)
+    f_brand_sm = get_system_font(12); f_badge = get_system_font(14, True)
+    f_hl = get_system_font(11); f_conf = get_system_font(18, True)
+    f_marker = get_system_font(12, True)
+
+    n_disp = min(50, len(candles)); display = candles[-n_disp:]; n = len(display)
+    closes = [float(c['close']) for c in display]
+    opens  = [float(c['open'])  for c in display]
+    highs  = [float(c['high'])  for c in display]
+    lows   = [float(c['low'])   for c in display]
+    vols   = [float(c.get('volume',1)) for c in display]
+
+    p_min = min(lows); p_max = max(highs); p_rng = p_max - p_min or 0.0001
+    pad = p_rng * 0.08; p_min -= pad; p_max += pad; p_rng = p_max - p_min
+
+    all_cl = [float(c['close']) for c in candles]
+    si = len(candles) - n
+    ema9  = cf_calc_ema(all_cl, 9)[si:]
+    ema21 = cf_calc_ema(all_cl, 21)[si:]
+    ema56 = cf_calc_ema(all_cl, 56)[si:]
+
+    sample = f"{p_max:.10f}".rstrip('0')
+    dp = max(2, min(len(sample.split('.')[1]) if '.' in sample else 2, 5))
+
+    chart_w = CHART_RIGHT - CHART_LEFT; chart_h = CHART_BOTTOM - CHART_TOP
+    def p2y(p): return int(CHART_TOP + chart_h - ((p - p_min) / p_rng) * chart_h)
+    ctw = chart_w / n; cbw = max(4, int(ctw * 0.55)); cgap = (ctw - cbw) / 2
+    def cx(i):  return int(CHART_LEFT + i * ctw + cgap)
+    def ccx(i): return int(CHART_LEFT + i * ctw + ctw / 2)
+
+    current_price = closes[-1]
+
+    # HEADER
+    draw.rectangle([0, 0, W, HEADER_H], fill=C['HEADER_BG'])
+    draw.line([(0, HEADER_H), (W, HEADER_H)], fill=C['SB_BORDER'], width=1)
+    now_pk = datetime.now(timezone.utc) + timedelta(hours=5)
+    hdr_pair = _fmt_pair(pair)
+    hdr_txt = f"SMZX PRO    {hdr_pair}    {header_extra}    {now_pk.strftime('%Y.%m.%d')}    {entry_time_str}:00"
+    hw = draw.textlength(hdr_txt, font=f_header)
+    draw.text(((W - hw) / 2, 12), hdr_txt, fill=C['TXT_WHITE'], font=f_header)
+
+    # GRID
+    mag = 10 ** (-dp); raw_step = p_rng / 8
+    p_step = max(mag, round(raw_step / mag) * mag)
+    gp = math.floor(p_min / p_step) * p_step
+    while gp <= p_max + p_step:
+        if p_min <= gp <= p_max:
+            y = p2y(gp)
+            if CHART_TOP < y < CHART_BOTTOM:
+                for xx in range(CHART_LEFT, CHART_RIGHT, 8):
+                    draw.line([(xx, y), (min(xx+4, CHART_RIGHT), y)], fill=C['GRID'], width=1)
+                draw.text((8, y-7), f"{gp:.{dp}f}", fill=C['TXT_GRAY'], font=f_price)
+        gp += p_step
+
+    real_hi = max(highs); real_lo = min(lows)
+    draw.text((CHART_LEFT+5, CHART_TOP+2), f"H: {real_hi:.{min(2,dp)}f}", fill=C['TXT_GRAY'], font=f_hl)
+    draw.text((CHART_LEFT+5, CHART_BOTTOM-18), f"L: {real_lo:.{min(2,dp)}f}", fill=C['TXT_GRAY'], font=f_hl)
+
+    # CANDLESTICKS
+    for i in range(n):
+        x = cx(i); cxx = ccx(i)
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        green = c >= o
+        bcol = C['CANDLE_GREEN'] if green else C['CANDLE_RED']
+        wcol = C['WICK_GREEN'] if green else C['WICK_RED']
+        bt = p2y(max(o,c)); bb = p2y(min(o,c)); wt = p2y(h); wb = p2y(l)
+        if bb - bt < 1: bb = bt + 1
+        draw.line([(cxx, wt), (cxx, wb)], fill=wcol, width=2)
+        draw.rectangle([x, bt, x+cbw, bb], fill=bcol)
+
+    # EMA LINES
+    def draw_ema(vals, color, w=2):
+        pts = [(ccx(i), p2y(vals[i])) for i in range(n) if vals[i] is not None and p_min <= vals[i] <= p_max]
+        for j in range(len(pts)-1): draw.line([pts[j], pts[j+1]], fill=color, width=w)
+    draw_ema(ema56, C['EMA56']); draw_ema(ema21, C['EMA21']); draw_ema(ema9, C['EMA9'])
+
+    # ENTRY GLOW (signal chart) or RESULT MARKERS
+    if result_type is None and direction:
+        last_cxv = ccx(n-1); glow_half = 25
+        glow_img = Image.new('RGBA', (W, H), (0,0,0,0)); gd = ImageDraw.Draw(glow_img)
+        for dx in range(-glow_half, glow_half+1):
+            a = int(55 * (1 - abs(dx)/glow_half)**2)
+            gd.line([(last_cxv+dx, CHART_TOP), (last_cxv+dx, CHART_BOTTOM)], fill=(0,220,180,a), width=1)
+        img.paste(Image.alpha_composite(Image.new('RGBA',(W,H),(0,0,0,0)), glow_img).convert('RGB'), (0,0), glow_img.split()[3])
+        draw = ImageDraw.Draw(img)
+        i = n-1; x = cx(i); cxx = ccx(i)
+        o,h,l,c = opens[i],highs[i],lows[i],closes[i]; green = c>=o
+        bcol = C['CANDLE_GREEN'] if green else C['CANDLE_RED']
+        wcol = C['WICK_GREEN'] if green else C['WICK_RED']
+        bt = p2y(max(o,c)); bb = p2y(min(o,c))
+        if bb-bt<1: bb=bt+1
+        draw.line([(cxx,p2y(h)),(cxx,p2y(l))],fill=wcol,width=2)
+        draw.rectangle([x,bt,x+cbw,bb],fill=bcol)
+        btxt = direction; btw = draw.textlength(btxt, font=f_badge)+24; bh=30
+        if direction=="CALL":
+            by = p2y(lows[n-1])+15; bcl=(0,185,85)
+            draw.polygon([(last_cxv,by-22),(last_cxv-7,by-12),(last_cxv+7,by-12)],fill=C['TXT_WHITE'])
+        else:
+            by = p2y(highs[n-1])-bh-15; bcl=(220,55,65)
+            draw.polygon([(last_cxv,by+bh+22),(last_cxv-7,by+bh+12),(last_cxv+7,by+bh+12)],fill=C['TXT_WHITE'])
+        bx = int(last_cxv - btw/2)
+        draw.rounded_rectangle([bx,by,bx+int(btw),by+bh], radius=6, fill=bcl)
+        tw_i = draw.textlength(btxt, font=f_badge)
+        draw.text((bx+(int(btw)-tw_i)/2, by+6), btxt, fill=C['TXT_WHITE'], font=f_badge)
+
+    # RESULT MARKERS
+    if result_type is not None and entry_idx is not None:
+        def _mark(idx, mtype):
+            x = cx(idx); cxx = ccx(idx)
+            h_v = highs[idx]; l_v = lows[idx]
+            yt = p2y(h_v); yb = p2y(l_v)
+            oc = C['GREEN'] if mtype=='win' else C['RED']
+            sym = "W" if mtype=='win' else "L"
+            gw = 15
+            gi = Image.new('RGBA',(W,H),(0,0,0,0)); gdraw = ImageDraw.Draw(gi)
+            for dx in range(-gw, gw+1):
+                a = int(40*(1-abs(dx)/gw)**2)
+                gc = (0,200,100,a) if mtype=='win' else (200,50,50,a)
+                gdraw.line([(cxx+dx,yt-5),(cxx+dx,yb+5)],fill=gc,width=1)
+            img.paste(Image.alpha_composite(Image.new('RGBA',(W,H),(0,0,0,0)),gi).convert('RGB'),(0,0),gi.split()[3])
+            draw_fresh = ImageDraw.Draw(img)
+            draw_fresh.text((cxx-5, yt-20), sym, fill=oc, font=f_marker)
+            return draw_fresh
+        if result_type == "WIN":
+            draw = _mark(entry_idx, 'win')
+        elif result_type == "LOSS":
+            draw = _mark(entry_idx, 'loss')
+        elif result_type == "MTG WIN":
+            draw = _mark(entry_idx, 'loss')
+            if second_idx is not None:
+                draw = _mark(second_idx, 'win')
+                x1 = ccx(entry_idx); x2 = ccx(second_idx)
+                ya = p2y(max(highs[entry_idx],highs[second_idx]))-28
+                draw.line([(x1,ya),(x2,ya)],fill=(255,215,0),width=2)
+                draw.polygon([(x2,ya),(x2-6,ya-5),(x2-6,ya+5)],fill=(255,215,0))
+                mtw = draw.textlength("MTG",font=f_small)
+                draw.text(((x1+x2)/2-mtw/2, ya-16),"MTG",fill=(255,215,0),font=f_small)
+
+    # CURRENT PRICE LINE
+    cp_y = p2y(current_price)
+    for xx in range(CHART_LEFT, CHART_RIGHT, 12):
+        draw.line([(xx,cp_y),(min(xx+6,CHART_RIGHT),cp_y)],fill=(85,95,115),width=1)
+    cp_txt = f"{current_price:.{dp}f}"
+    cp_tw = draw.textlength(cp_txt, font=f_price)+14
+    tag_x = CHART_RIGHT - int(cp_tw) - 2
+    draw.rounded_rectangle([tag_x, cp_y-11, tag_x+int(cp_tw), cp_y+11],
+                           radius=3, fill=(18,28,45), outline=C['CYAN'], width=1)
+    draw.text((tag_x+7, cp_y-7), cp_txt, fill=C['CYAN'], font=f_price)
+
+    # EMA LEGEND
+    draw.text((CHART_LEFT, EMA_LEGEND_Y), "EMA 9", fill=C['EMA9'], font=f_ema)
+    draw.text((CHART_LEFT+85, EMA_LEGEND_Y), "EMA 21", fill=C['EMA21'], font=f_ema)
+    draw.text((CHART_LEFT+180, EMA_LEGEND_Y), "EMA 56", fill=C['EMA56'], font=f_ema)
+
+    # VOLUME
+    draw.line([(CHART_LEFT, VOLUME_TOP-8),(CHART_RIGHT, VOLUME_TOP-8)],fill=C['GRID'],width=1)
+    draw.text((20, VOLUME_TOP-4),"VOL",fill=C['TXT_GRAY'],font=f_vol)
+    vol_h = VOLUME_BOTTOM - VOLUME_TOP; mx_vol = max(vols) if vols else 1
+    for i in range(n):
+        x = cx(i); v = vols[i]; bh = max(2, int((v/mx_vol)*vol_h*0.8))
+        green = closes[i] >= opens[i]
+        out_c = C['CANDLE_GREEN'] if green else C['CANDLE_RED']
+        fill_c = (0,100,65) if green else (120,35,42)
+        bt = VOLUME_BOTTOM - bh
+        draw.rectangle([x, bt, x+cbw, VOLUME_BOTTOM], outline=out_c, width=1)
+        if bh > 2: draw.rectangle([x+1, bt+1, x+cbw-1, VOLUME_BOTTOM-1], fill=fill_c)
+
+    # TIME LABELS
+    step = max(1, n // 9)
+    for i in range(0, n, step):
+        ts = ""
+        if 'time' in display[i]:
+            try: ts = (datetime.fromtimestamp(display[i]['time'])+timedelta(hours=5)).strftime("%H:%M")
+            except: pass
+        if ts:
+            tw_t = draw.textlength(ts, font=f_time)
+            draw.text((ccx(i)-tw_t/2, TIME_Y), ts, fill=C['TXT_GRAY'], font=f_time)
+
+    # VOL % LABEL
+    vol_chg = abs((vols[-1]-vols[-2])/vols[-2]*100) if len(vols)>=2 and vols[-2]>0 else 0
+    draw.text((CHART_LEFT+5, CHART_TOP-15), f"VOL {vol_chg:.2f}%", fill=C['GREEN'], font=f_small)
+
+    # CONFIDENCE BADGE
+    cb_txt = f"{confidence:.0f}%"; cb_x = CHART_RIGHT-65; cb_y = CHART_TOP-8
+    draw.polygon([(cb_x+18,cb_y),(cb_x+6,cb_y+20),(cb_x+30,cb_y+20)],fill=C['YGREEN'])
+    draw.text((cb_x+36, cb_y+1), cb_txt, fill=C['YGREEN'], font=f_conf)
+
+    # RIGHT SIDEBAR
+    sb_x = W - SIDEBAR_W
+    draw.rectangle([sb_x, HEADER_H, W, H], fill=C['SIDEBAR_BG'])
+    draw.line([(sb_x, HEADER_H),(sb_x, H)], fill=C['SB_BORDER'], width=1)
+    lbl_x = sb_x+22; val_x = W-22
+    sb_cx = sb_x + SIDEBAR_W//2
+    dir_color = C['GREEN'] if direction == "CALL" else C['RED']
+
+    def sb_row(y, label, value, vcol=C['TXT_WHITE']):
+        draw.text((lbl_x, y), label, fill=C['TXT_GRAY'], font=f_sidebar_lbl)
+        vw = draw.textlength(str(value), font=f_sidebar_val)
+        draw.text((val_x-vw, y), str(value), fill=vcol, font=f_sidebar_val)
+
+    # Top section (SIGNAL or RESULT)
+    rh = 30
+    if sidebar_top_section:
+        sy = HEADER_H + 28
+        shdr = sidebar_top_section['title']
+        shw = draw.textlength(shdr, font=f_sidebar_ttl)
+        draw.text((sb_cx-shw/2, sy), shdr, fill=C['SEC_HDR'], font=f_sidebar_ttl)
+        draw.line([(sb_x+18, sy+22),(W-18, sy+22)], fill=C['SB_BORDER'], width=1)
+        ry = sy + 38
+        for i, (lbl, val, col) in enumerate(sidebar_top_section['rows']):
+            sb_row(ry + i*rh, lbl, val, col)
     else:
-        arrow_y=price_to_y(data[-1]['low'])+30
-        points=[(last_x, arrow_y+arrow_size),(last_x-arrow_size//2,arrow_y),(last_x-arrow_size//4,arrow_y),(last_x-arrow_size//4,arrow_y-arrow_size//2),(last_x+arrow_size//4,arrow_y-arrow_size//2),(last_x+arrow_size//4,arrow_y),(last_x+arrow_size//2,arrow_y)]
-        draw.polygon(points, fill=(255,0,0))
-    path="temp_chart.png"; img.save(path, quality=100, subsampling=0)
+        sy = HEADER_H + 28
+        shdr = "\u2014 SIGNAL \u2014"
+        shw = draw.textlength(shdr, font=f_sidebar_ttl)
+        draw.text((sb_cx-shw/2, sy), shdr, fill=C['SEC_HDR'], font=f_sidebar_ttl)
+        draw.line([(sb_x+18, sy+22),(W-18, sy+22)], fill=C['SB_BORDER'], width=1)
+        ry = sy + 38
+        sb_row(ry, "Direction", direction or "", dir_color)
+        sb_row(ry+rh, "Confidence", f"{confidence:.1f}%", C['TXT_WHITE'])
+        sb_row(ry+rh*2, "Price", f"{current_price:.{min(4,dp)}f}", C['TXT_WHITE'])
+        sb_row(ry+rh*3, "Time", entry_time_str, C['TXT_WHITE'])
+
+    # PERFORMANCE
+    py = sy + rh*4 + 56
+    phdr = "\u2014 PERFORMANCE \u2014"
+    phw = draw.textlength(phdr, font=f_sidebar_ttl)
+    draw.text((sb_cx-phw/2, py), phdr, fill=C['SEC_HDR'], font=f_sidebar_ttl)
+    draw.line([(sb_x+18, py+22),(W-18, py+22)], fill=C['SB_BORDER'], width=1)
+    total = wins + losses; wr = (wins/total*100) if total>0 else 0
+    pry = py + 38
+    sb_row(pry, "Win Rate", f"{wr:.1f}%", C['GREEN'])
+    bar_x = lbl_x; bar_y = pry+rh; bar_w = SIDEBAR_W-44; bar_h = 14
+    draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h], radius=4, fill=(28,38,52))
+    filled = int(bar_w * wr / 100)
+    if filled > 0:
+        draw.rounded_rectangle([bar_x, bar_y, bar_x+filled, bar_y+bar_h], radius=4, fill=C['GREEN'])
+    sb_row(pry+rh+22, "Wins", str(wins), C['GREEN'])
+    sb_row(pry+rh*2+22, "Losses", str(losses), C['RED'])
+    sb_row(pry+rh*3+22, "Streak", f"{wins}W/{losses}L", C['TXT_WHITE'])
+
+    # SESSION
+    ssy = pry + rh*4 + 52
+    ss_hdr = "\u2014 SESSION \u2014"
+    ssw = draw.textlength(ss_hdr, font=f_sidebar_ttl)
+    draw.text((sb_cx-ssw/2, ssy), ss_hdr, fill=C['SEC_HDR'], font=f_sidebar_ttl)
+    draw.line([(sb_x+18, ssy+22),(W-18, ssy+22)], fill=C['SB_BORDER'], width=1)
+    sry = ssy + 38
+    sb_row(sry, "Signals", str(max(1, total)), C['TXT_WHITE'])
+    sb_row(sry+rh, "Pair", _fmt_pair(pair), C['CYAN'])
+    sb_row(sry+rh*2, "Mode", STRATEGY_NAMES.get(strategy, "auto"), C['GREEN'])
+    sb_row(sry+rh*3, "Martingale", f"{martingale_steps} Step(s)", C['TXT_WHITE'])
+
+    # BRANDING
+    br_w, br_h = 260, 68; br_x = W-br_w-28; br_y = H-br_h-18
+    draw.rounded_rectangle([br_x, br_y, br_x+br_w, br_y+br_h],
+                           radius=8, fill=(11,15,21), outline=(38,52,72), width=1)
+    bt_txt = "SMZX PRO"; btw2 = draw.textlength(bt_txt, font=f_brand)
+    draw.text((br_x+(br_w-btw2)/2, br_y+12), bt_txt, fill=C['BRAND_CYAN'], font=f_brand)
+    cr_txt = "\u2666 @Rohailtrader \u2666"; ctw2 = draw.textlength(cr_txt, font=f_brand_sm)
+    draw.text((br_x+(br_w-ctw2)/2, br_y+42), cr_txt, fill=C['TXT_GRAY'], font=f_brand_sm)
+
+
+def draw_neon_chart(candles, pair, trade_time, direction, payout,
+                    confidence=80, wins=0, losses=0, strategy=1, martingale_steps=1):
+    W, H = 1560, 780
+    img, C = _chart_base(W, H)
+    draw = ImageDraw.Draw(img)
+    arrow = "\u25b2" if direction == "CALL" else "\u25bc"
+    hdr_extra = f"{arrow} {direction} {confidence:.1f}%"
+    _draw_pro_body(img, draw, candles, pair, W, H, C,
+                   wins=wins, losses=losses, strategy=strategy,
+                   martingale_steps=martingale_steps,
+                   header_extra=hdr_extra, direction=direction,
+                   confidence=confidence, entry_time_str=trade_time)
+    path = f"smzx_chart_{uuid.uuid4().hex[:8]}.png"
+    img.save(path, quality=100, subsampling=0)
     return path
 
-def draw_result_chart(candles, pair, payout, result_type, entry_candle, second_candle=None):
-    w, h = 1000, 600; right_pad=100; volume_height=60; chart_bottom=h-volume_height-30
-    img=create_gradient_background(w, h, (8,10,25), (18,22,45)); draw=ImageDraw.Draw(img)
-    watermark_font=get_system_font(90,bold=True)
-    try: tw=draw.textlength("SMZX 4.3", font=watermark_font)
-    except: tw=450
-    watermark_x=(w-tw)//2; watermark_y=(h-100)//2
-    draw.text((watermark_x+3,watermark_y+3),"SMZX 4.3",fill=(15,15,35),font=watermark_font)
-    draw.text((watermark_x,watermark_y),"SMZX 4.3",fill=(40,40,70),font=watermark_font)
-    font_large=get_system_font(24,bold=True); font_med=get_system_font(16,bold=True); font_small=get_system_font(12); font_price=get_system_font(13,bold=True)
-    header_text="SMZX RESULT CHART"; header_w=draw.textlength(header_text,font=font_large)
-    draw.text(((w-header_w)//2+2,14),header_text,fill=(0,0,0),font=font_large)
-    draw.text(((w-header_w)//2,12),header_text,fill=(255,220,220),font=font_large)
-    result_display="WIN" if "WIN" in result_type else "LOSS"
-    sub_text=f"{pair}  |  PAYOUT: {payout}%  |  RESULT: {result_display}"; sub_w=draw.textlength(sub_text,font=font_med)
-    draw.text(((w-sub_w)//2+1,42),sub_text,fill=(0,0,0),font=font_med)
-    draw.text(((w-sub_w)//2,40),sub_text,fill=(220,220,255),font=font_med)
-    data = candles[-70:]
-    if len(data) < 70: data = candles[-len(data):]
-    highs=[c['high'] for c in data]; lows=[c['low'] for c in data]; closes=[c['close'] for c in data]
-    mn,mx=min(lows),max(highs); diff=(mx-mn) or 0.0001; padding=diff*0.05; mn-=padding; mx+=padding; diff=mx-mn
-    def price_to_y(p): return chart_bottom - int(((p-mn)/diff)*(chart_bottom-60))
-    entry_idx=None; second_idx=None
-    for i,c in enumerate(data):
-        if c['time']==entry_candle['time']: entry_idx=i
-        if second_candle and c['time']==second_candle['time']: second_idx=i
-    if entry_idx is None: entry_idx=len(data)-1
-    grid_color=(35,35,65); label_color=(200,200,220)
-    for i in range(11): 
-        y=50+i*(chart_bottom-50)//10; price_level=mx-(i/10)*(mx-mn)
-        draw.line([(10,y),(w-right_pad,y)],fill=grid_color,width=1)
-        draw.text((w-right_pad+5,y-6),f"{price_level:.5f}",fill=label_color,font=font_small)
-    candle_area_width=w-right_pad-20; cw=max(4,candle_area_width//len(data)); spacing=max(0,cw-6); candle_w=min(cw-spacing,8)
-    for i,c in enumerate(data):
-        x=15+i*cw+spacing//2; draw_sharp_candle(draw,x,candle_w,c['open'],c['high'],c['low'],c['close'],price_to_y)
-    volumes=[c.get('volume',1) for c in data]; max_vol=max(volumes) if volumes else 1; vol_bottom=h-15
-    for i,vol in enumerate(volumes):
-        x=15+i*cw+spacing//2; bar_height=int((vol/max_vol)*volume_height) if max_vol>0 else 5
-        color=(0,120,0) if data[i]['close']>=data[i]['open'] else (140,0,0)
-        draw.rectangle([x,vol_bottom-bar_height,x+candle_w,vol_bottom],fill=color)
-    def draw_marker(idx,marker_type):
-        x=15+idx*cw+spacing//2; candle=data[idx]; y_top=price_to_y(candle['high']); y_bottom=price_to_y(candle['low'])
-        outline_color=(0,255,0) if marker_type=='win' else (255,0,0)
-        symbol="✓" if marker_type=='win' else "✗"
-        draw.rectangle([x-4,y_top-4,x+candle_w+4,y_bottom+4],outline=outline_color,width=3)
-        circle_x=x+candle_w//2-12; circle_y=y_top-35 if y_top>50 else y_bottom+15
-        draw.ellipse([circle_x,circle_y,circle_x+24,circle_y+24],fill=(0,0,0),outline=outline_color,width=2)
-        draw.text((circle_x+6,circle_y+2),symbol,fill=outline_color,font=font_med)
-    if result_type=="WIN": draw_marker(entry_idx,'win')
-    elif result_type=="LOSS": draw_marker(entry_idx,'loss')
-    elif result_type=="MTG WIN":
-        if second_idx is not None:
-            draw_marker(entry_idx,'loss'); draw_marker(second_idx,'win')
-            x1=15+entry_idx*cw+spacing//2+candle_w//2; x2=15+second_idx*cw+spacing//2+candle_w//2
-            y_arrow=price_to_y(max(data[entry_idx]['high'],data[second_idx]['high']))-30
-            draw.line([(x1,y_arrow),(x2,y_arrow)],fill=(255,215,0),width=2)
-            draw.polygon([(x2,y_arrow),(x2-6,y_arrow-5),(x2-6,y_arrow+5)],fill=(255,215,0))
-            draw.text(((x1+x2)//2-20,y_arrow-18),"MTG",fill=(255,215,0),font=font_small)
-    current_price=closes[-1]; y_price=price_to_y(current_price)
-    for px in range(10,w-right_pad,15): draw.line([(px,y_price),(px+8,y_price)],fill=(255,240,0),width=2)
-    path="temp_result_chart.png"; img.save(path,quality=100,subsampling=0); return path
+
+def draw_result_chart(candles, pair, payout, result_type, entry_candle, second_candle=None,
+                      wins=0, losses=0, strategy=1, confidence=80, direction=None, entry_time_str=""):
+    W, H = 1560, 780
+    img, C = _chart_base(W, H)
+    draw = ImageDraw.Draw(img)
+
+    result_display = "WIN" if "WIN" in result_type else "LOSS"
+    result_color = C['GREEN'] if "WIN" in result_type else C['RED']
+    hdr_extra = f"RESULT: {result_display}    PAYOUT: {payout}%"
+
+    n_disp = min(50, len(candles)); display = candles[-n_disp:]
+    entry_idx = None; second_idx = None
+    for i, c in enumerate(display):
+        if 'time' in c and 'time' in entry_candle and c['time'] == entry_candle['time']:
+            entry_idx = i
+        if second_candle and 'time' in c and 'time' in second_candle and c['time'] == second_candle['time']:
+            second_idx = i
+    if entry_idx is None:
+        entry_idx = len(display) - 1
+
+    sidebar_top = {
+        'title': "\u2014 RESULT \u2014",
+        'rows': [
+            ("Result", result_display, result_color),
+            ("Direction", direction or "", C['GREEN'] if direction == "CALL" else C['RED']),
+            ("Payout", f"{payout}%", C['TXT_WHITE']),
+            ("Time", entry_time_str, C['TXT_WHITE']),
+        ]
+    }
+
+    _draw_pro_body(img, draw, candles, pair, W, H, C,
+                   wins=wins, losses=losses, strategy=strategy,
+                   martingale_steps=1, header_extra=hdr_extra,
+                   sidebar_top_section=sidebar_top,
+                   entry_idx=entry_idx, second_idx=second_idx,
+                   result_type=result_type, direction=direction,
+                   confidence=confidence, entry_time_str=entry_time_str)
+    path = f"smzx_result_{uuid.uuid4().hex[:8]}.png"
+    img.save(path, quality=100, subsampling=0)
+    return path
 
 # ══════════════ SMZXBot (animated progress, premium emojis, Telethon for all) ══════════════
 LIVE_PAIRS = ["EURUSD","GBPUSD","USDJPY","AUDUSD","USDCAD","EURJPY","GBPJPY","EURAUD","GBPCAD","AUDJPY","NZDJPY","EURCHF","GBPCHF"]
@@ -1262,11 +1466,15 @@ class SMZXBot:
             if ema: return "Bullish" if closes[-1] > ema else "Bearish"
         return "Bullish" if direction == "CALL" else "Bearish"
 
-    def send_signal_with_chart(self, pair, price, bias, entry_t, candles, payout):
+    def send_signal_with_chart(self, pair, price, bias, entry_t, candles, payout, confidence=80):
         direction = "CALL" if bias == "CALL" else "PUT"
         trend_text = self.get_trend_text(candles, direction)
         signal_text = build_signal_message(pair, entry_t, direction, payout, trend_text)
-        chart_path = draw_neon_chart(candles, pair, entry_t, direction, payout)
+        st = get_state(self.uid)
+        chart_path = draw_neon_chart(candles, pair, entry_t, direction, payout,
+                                    confidence=confidence,
+                                    wins=st.stats['wins'], losses=st.stats['losses'],
+                                    strategy=self.strategy, martingale_steps=1)
         if chart_path and os.path.exists(chart_path):
             sender.send_file(self.uid, chart_path, signal_text)
             try: os.remove(chart_path)
@@ -1274,14 +1482,18 @@ class SMZXBot:
         else:
             sender.send_message(self.uid, signal_text)
 
-    def send_result_with_chart(self, pair, entry_time, entry_candle, second_candle, payout, result_type, candles):
+    def send_result_with_chart(self, pair, entry_time, entry_candle, second_candle, payout, result_type, candles, direction=None):
         if result_type == "WIN":
             msg = build_result_message_first_win(pair, entry_time, payout, self.stats['wins'], self.stats['losses'])
         elif result_type == "MTG WIN":
             msg = build_result_message_second_win(pair, entry_time, payout, self.stats['wins'], self.stats['losses'])
         else:
             msg = build_result_message_loss(pair, entry_time, payout, self.stats['wins'], self.stats['losses'])
-        chart_path = draw_result_chart(candles, pair, payout, result_type, entry_candle, second_candle)
+        st = get_state(self.uid)
+        chart_path = draw_result_chart(candles, pair, payout, result_type, entry_candle, second_candle,
+                                       wins=st.stats['wins'], losses=st.stats['losses'],
+                                       strategy=self.strategy, direction=direction,
+                                       entry_time_str=entry_time)
         if chart_path and os.path.exists(chart_path):
             sender.send_file(self.uid, chart_path, msg)
             try: os.remove(chart_path)
@@ -1345,7 +1557,7 @@ class SMZXBot:
                         continue
                     entry_t = entry_dt.strftime("%H:%M")
                     sender.edit_message(uid, progress_id, "✅ Signal found! Sending...")
-                    self.send_signal_with_chart(pair, price, bias, entry_t, candles, payout)
+                    self.send_signal_with_chart(pair, price, bias, entry_t, candles, payout, confidence=score)
                     sender.edit_message(uid, progress_id, "⏳ Monitoring result...")
                     self.handle_signal_result(pair, entry_dt, bias, payout, candles)
                     signal_found = True
@@ -1375,7 +1587,7 @@ class SMZXBot:
         if not win1: st.last_loss[pair] = datetime.now(timezone.utc) + timedelta(hours=5)
         if win1:
             st.stats['wins'] += 1
-            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "WIN", candles)
+            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "WIN", candles, direction=direction)
             return
         close_time_2 = entry_dt_utc5 + timedelta(minutes=2)
         self.sleep_until(close_time_2)
@@ -1389,10 +1601,10 @@ class SMZXBot:
             st.signal_history[-1]['result'] = "WIN"
             st.signal_history[-1]['type'] = "MTG"
             st.stats['wins'] += 1
-            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, second, payout, "MTG WIN", candles2)
+            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, second, payout, "MTG WIN", candles2, direction=direction)
         else:
             st.stats['losses'] += 1
-            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "LOSS", candles2)
+            self.send_result_with_chart(pair, entry_dt_utc5.strftime('%H:%M'), first, None, payout, "LOSS", candles2, direction=direction)
 
 # ══════════════ LIVE CHECKER (flexible format parser + readable_time matching) ══════════════
 def clean_int_input(text: str) -> str:
