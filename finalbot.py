@@ -1043,12 +1043,18 @@ def _get_chart_font(size, bold=False, medium=False):
     sz = _sf(size)
     if bold:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Bold.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Bold.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Bold.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
     elif medium:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Medium.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Medium.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Medium.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     else:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Regular.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     for p in paths:
         if os.path.exists(p):
@@ -1217,11 +1223,16 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     # ── SIGNAL HISTORY W MARKERS (previous results on chart) ──
     if signal_history:
         for sh in signal_history:
+            sh_pair = sh.get('pair', '')
+            if sh_pair and sh_pair != pair:
+                continue
             sh_time = sh.get('time', '')
+            if not sh_time:
+                continue
             for i, cd in enumerate(display):
                 if 'time' in cd:
                     try:
-                        ct = (datetime.fromtimestamp(cd['time']) + timedelta(hours=5)).strftime("%H:%M")
+                        ct = (datetime.fromtimestamp(cd['time'], tz=timezone.utc) + timedelta(hours=5)).strftime("%H:%M")
                     except:
                         ct = ""
                     if ct == sh_time:
@@ -1371,7 +1382,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         ts = ""
         if 'time' in display[i]:
             try:
-                ts = (datetime.fromtimestamp(display[i]['time']) + timedelta(hours=5)).strftime("%H:%M")
+                ts = (datetime.fromtimestamp(display[i]['time'], tz=timezone.utc) + timedelta(hours=5)).strftime("%H:%M")
             except: pass
         if ts:
             tw_t = draw.textlength(ts, font=f_time)
