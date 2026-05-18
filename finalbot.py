@@ -1235,6 +1235,12 @@ def run_ai_mode(uid):
         return
 
     top = ranked[0]
+
+    # Recalculate entry time to the NEXT minute from NOW (scan may have taken time)
+    fresh_entry = datetime.now(timezone.utc) + timedelta(hours=5)
+    fresh_entry = fresh_entry.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    top['entry_dt'] = fresh_entry
+
     analysis_msg = _ai_build_analysis_msg(ranked, scan_time)
     sender.edit_message(uid, progress_id,
         f"🤖 AI Mode — ✅ Best signal found!\n"
