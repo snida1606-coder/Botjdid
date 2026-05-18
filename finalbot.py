@@ -1035,20 +1035,27 @@ STRATEGY_NAMES = {1:"RSI basic",2:"EMA filtered",3:"WR divergence",
 
 # ══════════════ V4 PRO CHART — supersampled, two-tone bg, transparent result boxes ══════════════
 _SS = 2  # supersample factor for anti-aliasing
+_FM = 1.6  # font multiplier for mobile readability
 
 def _sf(v):
     return int(v * _SS)
 
 def _get_chart_font(size, bold=False, medium=False):
-    sz = _sf(size)
+    sz = int(size * _SS * _FM)
     if bold:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Bold.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Bold.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Bold.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
     elif medium:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Medium.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Medium.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Medium.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     else:
         paths = ["/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+                 os.path.expanduser("~/.local/share/fonts/JetBrainsMono-Regular.ttf"),
                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     for p in paths:
         if os.path.exists(p):
@@ -1066,16 +1073,16 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     W_OUT, H_OUT = 1560, 780
     W, H = _sf(W_OUT), _sf(H_OUT)
 
-    HEADER_H = _sf(54)
-    SIDEBAR_W = _sf(310)
-    CHART_LEFT = _sf(80)
+    HEADER_H = _sf(68)
+    SIDEBAR_W = _sf(380)
+    CHART_LEFT = _sf(100)
     CHART_RIGHT = W - SIDEBAR_W - _sf(20)
     CHART_TOP = HEADER_H + _sf(24)
     CHART_BOTTOM = H - _sf(225)
-    EMA_LEGEND_Y = CHART_BOTTOM + _sf(15)
-    VOLUME_TOP = CHART_BOTTOM + _sf(48)
+    EMA_LEGEND_Y = CHART_BOTTOM + _sf(18)
+    VOLUME_TOP = CHART_BOTTOM + _sf(52)
     VOLUME_BOTTOM = H - _sf(42)
-    TIME_Y = H - _sf(28)
+    TIME_Y = H - _sf(30)
 
     # Exact competitor colors (pixel-sampled)
     BG_HEADER    = (3, 6, 15)
@@ -1105,7 +1112,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     BRAND_CYAN   = (39, 189, 226)
     BAR_BG       = (22, 28, 42)
 
-    # Fonts
+    # Fonts (sizes are base px — _FM multiplier applied inside _get_chart_font)
     f_header      = _get_chart_font(15, medium=True)
     f_price       = _get_chart_font(11)
     f_small       = _get_chart_font(10)
@@ -1120,7 +1127,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     f_badge       = _get_chart_font(13, bold=True)
     f_hl          = _get_chart_font(9)
     f_conf        = _get_chart_font(14, bold=True)
-    f_marker      = _get_chart_font(10, bold=True)
+    f_marker      = _get_chart_font(12, bold=True)
 
     # Image with two-tone background
     img = Image.new('RGB', (W, H), BG_CHART)
@@ -1170,7 +1177,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         hdr_txt = f"SMZX PRO    {hdr_pair}    {arrow} {direction} {confidence:.1f}%    {date_s}    {entry_time_str}:00"
     hw = draw.textlength(hdr_txt, font=f_header)
     hdr_x = (W - SIDEBAR_W - hw) / 2
-    hdr_y = (HEADER_H - _sf(15)) / 2
+    hdr_y = (HEADER_H - int(15 * _SS * _FM)) / 2
     draw.text((hdr_x, hdr_y), hdr_txt, fill=TXT_WHITE, font=f_header)
 
     # ── PRICE GRID ──
@@ -1186,7 +1193,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
                     x2 = min(x + dash, CHART_RIGHT)
                     draw.line([(x, y), (x2, y)], fill=GRID, width=1)
                     x += dash + gap
-                draw.text((_sf(8), y - _sf(7)), f"{gp:.{dp}f}", fill=TXT_GRAY, font=f_price)
+                draw.text((_sf(4), y - _sf(9)), f"{gp:.{dp}f}", fill=TXT_GRAY, font=f_price)
         gp += p_step
 
     draw.text((CHART_LEFT + _sf(5), CHART_TOP + _sf(2)),
@@ -1316,7 +1323,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         draw.line([(cxx, p2y(h)), (cxx, p2y(l))], fill=wcol, width=max(1, _SS))
         draw.rectangle([x, bt, x + cbw, bb], fill=bcol)
         btxt = direction
-        btw = draw.textlength(btxt, font=f_badge) + _sf(20); bh = _sf(26)
+        btw = draw.textlength(btxt, font=f_badge) + _sf(24); bh = _sf(32)
         if direction == "CALL":
             by = p2y(lows[n-1]) + _sf(14); bcl = (0, 185, 100)
             draw.polygon([(last_cxv, by - _sf(12)), (last_cxv - _sf(5), by - _sf(3)),
@@ -1328,7 +1335,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         bx = int(last_cxv - btw / 2)
         draw.rounded_rectangle([bx, by, bx + int(btw), by + bh], radius=_sf(4), fill=bcl)
         tw_i = draw.textlength(btxt, font=f_badge)
-        draw.text((bx + (int(btw) - tw_i) / 2, by + _sf(4)), btxt, fill=TXT_WHITE, font=f_badge)
+        draw.text((bx + (int(btw) - tw_i) / 2, by + _sf(5)), btxt, fill=TXT_WHITE, font=f_badge)
 
     # ── CURRENT PRICE LINE + TAG ──
     cp_y = p2y(current_price)
@@ -1338,21 +1345,21 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         draw.line([(x, cp_y), (x2, cp_y)], fill=(50, 58, 72), width=1)
         x += _sf(4) + _sf(4)
     cp_txt = f"{current_price:.{dp}f}"
-    cp_tw = draw.textlength(cp_txt, font=f_price) + _sf(10)
+    cp_tw = draw.textlength(cp_txt, font=f_price) + _sf(14)
     tag_x = CHART_RIGHT - int(cp_tw) - _sf(2)
-    draw.rounded_rectangle([tag_x, cp_y - _sf(9), tag_x + int(cp_tw), cp_y + _sf(9)],
+    draw.rounded_rectangle([tag_x, cp_y - _sf(12), tag_x + int(cp_tw), cp_y + _sf(12)],
                            radius=_sf(3), fill=(8, 16, 30), outline=CYAN, width=_SS)
-    draw.text((tag_x + _sf(5), cp_y - _sf(6)), cp_txt, fill=CYAN, font=f_price)
+    draw.text((tag_x + _sf(7), cp_y - _sf(9)), cp_txt, fill=CYAN, font=f_price)
 
     # ── EMA LEGEND ──
     draw.text((CHART_LEFT, EMA_LEGEND_Y), "EMA 9", fill=EMA9_LBL, font=f_ema)
-    draw.text((CHART_LEFT + _sf(80), EMA_LEGEND_Y), "EMA 21", fill=EMA21_LBL, font=f_ema)
-    draw.text((CHART_LEFT + _sf(170), EMA_LEGEND_Y), "EMA 56", fill=EMA56_LBL, font=f_ema)
+    draw.text((CHART_LEFT + _sf(100), EMA_LEGEND_Y), "EMA 21", fill=EMA21_LBL, font=f_ema)
+    draw.text((CHART_LEFT + _sf(210), EMA_LEGEND_Y), "EMA 56", fill=EMA56_LBL, font=f_ema)
 
     # ── VOLUME ──
     draw.line([(CHART_LEFT, VOLUME_TOP - _sf(6)), (CHART_RIGHT, VOLUME_TOP - _sf(6))],
               fill=HEADER_LINE, width=1)
-    draw.text((_sf(18), VOLUME_TOP - _sf(2)), "VOL", fill=TXT_GRAY, font=f_vol)
+    draw.text((_sf(18), VOLUME_TOP - _sf(4)), "VOL", fill=TXT_GRAY, font=f_vol)
     vol_h = VOLUME_BOTTOM - VOLUME_TOP; mx_vol = max(vols) if vols else 1
     for i in range(n):
         x = cx(i); v = vols[i]
@@ -1384,22 +1391,22 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
 
     # ── CONFIDENCE BADGE (gold) ──
     cb_txt = f"{confidence:.0f}%"
-    cb_x = CHART_RIGHT - _sf(70); cb_y = CHART_TOP - _sf(14)
-    badge_w = _sf(60); badge_h = _sf(26)
+    cb_x = CHART_RIGHT - _sf(85); cb_y = CHART_TOP - _sf(18)
+    badge_w = _sf(76); badge_h = _sf(34)
     draw.rounded_rectangle([cb_x, cb_y, cb_x + badge_w, cb_y + badge_h],
                            radius=_sf(4), fill=GOLD)
-    tri_x = cb_x + _sf(12); tri_y = cb_y + _sf(6)
-    draw.polygon([(tri_x, tri_y), (tri_x - _sf(5), tri_y + _sf(11)),
-                  (tri_x + _sf(5), tri_y + _sf(11))], fill=TXT_WHITE)
-    draw.text((cb_x + _sf(22), cb_y + _sf(4)), cb_txt, fill=TXT_WHITE, font=f_conf)
+    tri_x = cb_x + _sf(14); tri_y = cb_y + _sf(7)
+    draw.polygon([(tri_x, tri_y), (tri_x - _sf(6), tri_y + _sf(13)),
+                  (tri_x + _sf(6), tri_y + _sf(13))], fill=TXT_WHITE)
+    draw.text((cb_x + _sf(28), cb_y + _sf(5)), cb_txt, fill=TXT_WHITE, font=f_conf)
 
     # ── RIGHT SIDEBAR ──
     sb_x = W - SIDEBAR_W
     draw.rectangle([sb_x, 0, W, H], fill=SIDEBAR_BG)
     draw.line([(sb_x, 0), (sb_x, H)], fill=SB_BORDER, width=_SS)
     sb_cx = sb_x + SIDEBAR_W // 2
-    lbl_x = sb_x + _sf(20); val_x = W - _sf(18)
-    rh = _sf(28)
+    lbl_x = sb_x + _sf(22); val_x = W - _sf(20)
+    rh = _sf(34)
     dir_color = GREEN if direction == "CALL" else RED
 
     def sb_row(y, label, value, vcol=TXT_WHITE):
@@ -1407,16 +1414,16 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
         vw = draw.textlength(str(value), font=f_sidebar_val)
         draw.text((val_x - vw, y), str(value), fill=vcol, font=f_sidebar_val)
 
-    sy = _sf(58)
+    sy = _sf(62)
     if result_mode:
         shdr = "\u2014 RESULT \u2014"
     else:
         shdr = "\u2014 SIGNAL \u2014"
     shw = draw.textlength(shdr, font=f_sidebar_ttl)
     draw.text((sb_cx - shw / 2, sy), shdr, fill=SECTION_HDR, font=f_sidebar_ttl)
-    draw.line([(lbl_x, sy + _sf(16)), (val_x, sy + _sf(16))], fill=SB_BORDER, width=1)
+    draw.line([(lbl_x, sy + _sf(20)), (val_x, sy + _sf(20))], fill=SB_BORDER, width=1)
 
-    ry = sy + _sf(28)
+    ry = sy + _sf(30)
     if result_mode:
         res_disp = "WIN" if result_type and "WIN" in result_type else "LOSS"
         res_col = GREEN if "WIN" in (result_type or "") else RED
@@ -1432,31 +1439,31 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
 
     # PERFORMANCE
     total = wins + losses; wr = (wins / total * 100) if total > 0 else 0
-    py = ry + rh * 4 + _sf(8)
+    py = ry + rh * 4 + _sf(10)
     phdr = "\u2014 PERFORMANCE \u2014"
     phw = draw.textlength(phdr, font=f_sidebar_ttl)
     draw.text((sb_cx - phw / 2, py), phdr, fill=SECTION_HDR, font=f_sidebar_ttl)
-    draw.line([(lbl_x, py + _sf(16)), (val_x, py + _sf(16))], fill=SB_BORDER, width=1)
-    pry = py + _sf(24)
+    draw.line([(lbl_x, py + _sf(20)), (val_x, py + _sf(20))], fill=SB_BORDER, width=1)
+    pry = py + _sf(28)
     sb_row(pry, "Win Rate", f"{wr:.1f}%", GREEN)
-    bar_x = lbl_x; bar_y = pry + rh; bar_w = SIDEBAR_W - _sf(40); bar_h = _sf(12)
+    bar_x = lbl_x; bar_y = pry + rh; bar_w = SIDEBAR_W - _sf(44); bar_h = _sf(14)
     draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h],
                            radius=_sf(4), fill=BAR_BG)
     filled = int(bar_w * wr / 100)
     if filled > 0:
         draw.rounded_rectangle([bar_x, bar_y, bar_x + filled, bar_y + bar_h],
                                radius=_sf(4), fill=GREEN)
-    sb_row(pry + rh + _sf(18), "Wins",   str(wins),              GREEN)
-    sb_row(pry + rh * 2 + _sf(18), "Losses", str(losses),        RED)
-    sb_row(pry + rh * 3 + _sf(18), "Streak", f"{wins}W/{losses}L", TXT_WHITE)
+    sb_row(pry + rh + _sf(22), "Wins",   str(wins),              GREEN)
+    sb_row(pry + rh * 2 + _sf(22), "Losses", str(losses),        RED)
+    sb_row(pry + rh * 3 + _sf(22), "Streak", f"{wins}W/{losses}L", TXT_WHITE)
 
     # SESSION
-    ssy = pry + rh * 4 + _sf(24)
+    ssy = pry + rh * 4 + _sf(28)
     ss_hdr = "\u2014 SESSION \u2014"
     ssw = draw.textlength(ss_hdr, font=f_sidebar_ttl)
     draw.text((sb_cx - ssw / 2, ssy), ss_hdr, fill=SECTION_HDR, font=f_sidebar_ttl)
-    draw.line([(lbl_x, ssy + _sf(16)), (val_x, ssy + _sf(16))], fill=SB_BORDER, width=1)
-    sry = ssy + _sf(24)
+    draw.line([(lbl_x, ssy + _sf(20)), (val_x, ssy + _sf(20))], fill=SB_BORDER, width=1)
+    sry = ssy + _sf(28)
     disp_pair = _fmt_pair(pair)
     sb_row(sry,          "Signals",    str(max(1, total + 1)), TXT_WHITE)
     sb_row(sry + rh,     "Pair",       disp_pair,              CYAN)
@@ -1464,7 +1471,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     sb_row(sry + rh * 3, "Martingale", f"{martingale_steps} Step(s)", TXT_WHITE)
 
     # BRANDING BOX
-    br_w = _sf(240); br_h = _sf(60)
+    br_w = _sf(280); br_h = _sf(74)
     br_x = W - br_w - _sf(22); br_y = H - br_h - _sf(14)
     draw.rounded_rectangle([br_x, br_y, br_x + br_w, br_y + br_h],
                            radius=_sf(5), fill=BG_CHART, outline=BRAND_YELLOW, width=_SS)
@@ -1473,7 +1480,7 @@ def _draw_v4_chart(candles, pair, direction, confidence, payout,
     draw.text((br_x + (br_w - btw2) / 2, br_y + _sf(8)), bt_txt, fill=BRAND_YELLOW, font=f_brand)
     cr_txt = "\u2666 @Rohailtrader \u2666"
     ctw2 = draw.textlength(cr_txt, font=f_brand_sm)
-    draw.text((br_x + (br_w - ctw2) / 2, br_y + _sf(36)), cr_txt, fill=BRAND_CYAN, font=f_brand_sm)
+    draw.text((br_x + (br_w - ctw2) / 2, br_y + _sf(44)), cr_txt, fill=BRAND_CYAN, font=f_brand_sm)
 
     # DOWNSCALE (LANCZOS anti-aliasing)
     img = img.resize((W_OUT, H_OUT), Image.LANCZOS)
