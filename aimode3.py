@@ -61,7 +61,7 @@ threading.Thread(target=run_uptime_server, daemon=True).start()
 BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
-GEMINI_API_KEY = "AIzaSyBUzDqdxNvaIxIkr7PO7jNkU6PEuKW5j-k"
+GEMINI_API_KEY = "AIzaSyBA6LAITt1Bh8DNy2JoSZ0UFebh4sYjiOQ"
 
 def is_authorized(uid: int) -> bool:
     headers = {"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}", "Content-Type": "application/json"}
