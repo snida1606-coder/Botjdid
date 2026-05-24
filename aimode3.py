@@ -3553,9 +3553,92 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['state'] = None
 
 # ══════════════ AI CHART ANALYZER (Gemini Vision) ══════════════
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+]
+
+def _gemini_call_with_retry(image_base64: str, prompt: str) -> requests.Response:
+    """Try Gemini API with retry + fallback models on 429/5xx errors."""
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 1024,
+        }
+    }
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        for attempt in range(3):
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                if resp.status_code == 200:
+                    return resp
+                if resp.status_code == 429:
+                    wait_sec = (attempt + 1) * 3
+                    print(f"Gemini 429 on {model}, retrying in {wait_sec}s (attempt {attempt+1}/3)")
+                    time.sleep(wait_sec)
+                    continue
+                if resp.status_code >= 500:
+                    time.sleep(2)
+                    continue
+                print(f"Gemini {model} error {resp.status_code}: {resp.text[:200]}")
+                break
+            except requests.exceptions.Timeout:
+                print(f"Gemini {model} timeout, attempt {attempt+1}/3")
+                time.sleep(2)
+                continue
+            except Exception as e:
+                print(f"Gemini {model} error: {e}")
+                break
+        print(f"Model {model} failed, trying next fallback...")
+    return None
+
+
+def _parse_gemini_response(text_response: str) -> dict:
+    """Parse structured fields from Gemini text response."""
+    result = {"raw": text_response}
+    for line in text_response.split("\n"):
+        line = line.strip()
+        if line.upper().startswith("DIRECTION:"):
+            val = line.split(":", 1)[1].strip().upper()
+            result["direction"] = "CALL" if "CALL" in val else "PUT" if "PUT" in val else val
+        elif line.upper().startswith("CONFIDENCE:"):
+            try:
+                num = re.search(r'\d+', line.split(":", 1)[1])
+                result["confidence"] = int(num.group()) if num else 75
+            except Exception:
+                result["confidence"] = 75
+        elif line.upper().startswith("PATTERNS:"):
+            result["patterns"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("TREND:"):
+            result["trend"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("SUPPORT:"):
+            result["support"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("RESISTANCE:"):
+            result["resistance"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("INDICATORS:"):
+            result["indicators"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("REASON:"):
+            result["reason"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("PAIR:"):
+            result["pair"] = line.split(":", 1)[1].strip()
+    if "direction" not in result:
+        result["direction"] = "CALL" if "CALL" in text_response.upper() else "PUT"
+    if "confidence" not in result:
+        result["confidence"] = 75
+    return result
+
+
 def _gemini_analyze_chart(image_base64: str) -> dict:
     """Send chart image to Gemini Vision API and get trading signal analysis."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = (
         "You are an expert technical analyst for binary options trading (Quotex platform, 1-minute timeframe). "
         "Analyze this trading chart screenshot carefully and provide:\n\n"
@@ -3577,61 +3660,15 @@ def _gemini_analyze_chart(image_base64: str) -> dict:
         "REASON: your explanation\n"
         "PAIR: detected pair name if visible (e.g., EUR/USD) or UNKNOWN\n"
     )
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 1024,
-        }
-    }
-    headers = {"Content-Type": "application/json"}
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            print(f"Gemini API error: {resp.status_code} - {resp.text[:200]}")
-            return {"error": f"Gemini API error: {resp.status_code}"}
+        resp = _gemini_call_with_retry(image_base64, prompt)
+        if resp is None:
+            return {"error": "All Gemini models are busy right now. Please wait 30 seconds and try again."}
         data = resp.json()
         text_response = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
         if not text_response:
             return {"error": "Empty response from Gemini"}
-        result = {"raw": text_response}
-        for line in text_response.split("\n"):
-            line = line.strip()
-            if line.upper().startswith("DIRECTION:"):
-                val = line.split(":", 1)[1].strip().upper()
-                result["direction"] = "CALL" if "CALL" in val else "PUT" if "PUT" in val else val
-            elif line.upper().startswith("CONFIDENCE:"):
-                try:
-                    num = re.search(r'\d+', line.split(":", 1)[1])
-                    result["confidence"] = int(num.group()) if num else 75
-                except Exception:
-                    result["confidence"] = 75
-            elif line.upper().startswith("PATTERNS:"):
-                result["patterns"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("TREND:"):
-                result["trend"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("SUPPORT:"):
-                result["support"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("RESISTANCE:"):
-                result["resistance"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("INDICATORS:"):
-                result["indicators"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("REASON:"):
-                result["reason"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("PAIR:"):
-                result["pair"] = line.split(":", 1)[1].strip()
-        if "direction" not in result:
-            result["direction"] = "CALL" if "CALL" in text_response.upper() else "PUT"
-        if "confidence" not in result:
-            result["confidence"] = 75
-        return result
-    except requests.exceptions.Timeout:
-        return {"error": "Gemini API timeout — try again"}
+        return _parse_gemini_response(text_response)
     except Exception as e:
         print(f"Gemini analysis error: {e}")
         return {"error": str(e)}
@@ -3696,7 +3733,7 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
         return
     if not update.message.photo:
         return
-    wait_msg = "📸 𝙲𝚑𝚊𝚛𝚝 𝚛𝚎𝚌𝚎𝚒𝚟𝚎𝚍! 🤖 𝙰𝚗𝚊𝚕𝚢𝚣𝚒𝚗𝚐 𝚠𝚒𝚝𝚑 𝙰𝙸...\n⏳ Please wait 5-10 seconds..."
+    wait_msg = "📸 𝙲𝚑𝚊𝚛𝚝 𝚛𝚎𝚌𝚎𝚒𝚟𝚎𝚍! 🤖 𝙰𝚗𝚊𝚕𝚢𝚣𝚒𝚗𝚐 𝚠𝚒𝚝𝚑 𝙰𝙸...\n⏳ Please wait 10-20 seconds (auto-retry if busy)..."
     entities = build_custom_emoji_entities(wait_msg)
     processing_msg = await update.message.reply_text(wait_msg, entities=entities)
     try:
