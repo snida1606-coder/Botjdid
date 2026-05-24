@@ -58,7 +58,7 @@ threading.Thread(target=run_uptime_server, daemon=True).start()
 
 
 # ══════════════ CONFIG ══════════════
-BOT_TOKEN = "7623409497:AAECia8u02Vwj4QOdBweRDwMlihn3n3RW38"
+BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
 GEMINI_API_KEY = "AIzaSyBUzDqdxNvaIxIkr7PO7jNkU6PEuKW5j-k"
@@ -3731,7 +3731,7 @@ def main():
 
     API_ID = 14017996
     API_HASH = "c04b4a519be12de0cf2826fde7c0ba9a"
-    BOT_TOKEN_SENDER = "7623409497:AAECia8u02Vwj4QOdBweRDwMlihn3n3RW38"
+    BOT_TOKEN_SENDER = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
     sender.start_with_bot_token(API_ID, API_HASH, BOT_TOKEN_SENDER)
 
     app = Application.builder().token(BOT_TOKEN).build()
