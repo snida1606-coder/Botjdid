@@ -62,6 +62,7 @@ BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 def is_authorized(uid: int) -> bool:
     headers = {"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}", "Content-Type": "application/json"}
@@ -3552,16 +3553,13 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=uid, text=formatted)
     context.user_data['state'] = None
 
-# ══════════════ AI CHART ANALYZER (Gemini Vision via SDK) ══════════════
-from google import genai
-from google.genai import types as genai_types
+# ══════════════ AI CHART ANALYZER (OpenRouter Vision API) ══════════════
 import io as _io
 
-_genai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-GEMINI_SDK_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+OPENROUTER_MODELS = [
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "google/gemma-4-31b-it:free",
+    "deepseek/deepseek-v4-flash:free",
 ]
 
 _chart_analyzer_cooldown: Dict[int, float] = {}
@@ -3589,8 +3587,8 @@ CHART_ANALYSIS_PROMPT = (
 )
 
 
-def _compress_image_for_gemini(photo_bytes: bytes) -> bytes:
-    """Compress image to reduce size before sending to Gemini API. Returns raw bytes."""
+def _compress_image(photo_bytes: bytes) -> bytes:
+    """Compress image to reduce size before sending to API. Returns raw bytes."""
     try:
         img = Image.open(_io.BytesIO(photo_bytes))
         max_dim = 1024
@@ -3606,8 +3604,8 @@ def _compress_image_for_gemini(photo_bytes: bytes) -> bytes:
         return photo_bytes
 
 
-def _parse_gemini_response(text_response: str) -> dict:
-    """Parse structured fields from Gemini text response."""
+def _parse_analysis_response(text_response: str) -> dict:
+    """Parse structured fields from AI text response."""
     result = {"raw": text_response}
     for line in text_response.split("\n"):
         line = line.strip()
@@ -3642,50 +3640,61 @@ def _parse_gemini_response(text_response: str) -> dict:
 
 
 def _gemini_analyze_chart(image_bytes: bytes) -> dict:
-    """Send chart image to Gemini Vision API using official google-genai SDK with fallback models."""
-    if not _genai_client or not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY not set. Add it as environment variable on Render."}
-    compressed = _compress_image_for_gemini(image_bytes)
-    image_part = genai_types.Part.from_bytes(data=compressed, mime_type="image/jpeg")
+    """Send chart image to OpenRouter Vision API with fallback models."""
+    if not OPENROUTER_API_KEY:
+        return {"error": "OPENROUTER_API_KEY not set. Add it as environment variable on Render."}
+    compressed = _compress_image(image_bytes)
+    b64 = base64.b64encode(compressed).decode('utf-8')
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
     last_error = None
-    for model_name in GEMINI_SDK_MODELS:
-        for attempt in range(3):
+    for model_name in OPENROUTER_MODELS:
+        for attempt in range(2):
             try:
-                print(f"Trying {model_name} (attempt {attempt+1}/3)...")
-                response = _genai_client.models.generate_content(
-                    model=model_name,
-                    contents=[CHART_ANALYSIS_PROMPT, image_part],
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0.3,
-                        max_output_tokens=1024,
-                    ),
+                print(f"Trying {model_name} (attempt {attempt+1}/2)...")
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": CHART_ANALYSIS_PROMPT},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                        ]}],
+                        "max_tokens": 1024,
+                        "temperature": 0.3,
+                    },
+                    timeout=60,
                 )
-                text_response = response.text
-                if not text_response:
-                    last_error = "Empty response from Gemini"
-                    continue
-                print(f"Gemini success on {model_name} (attempt {attempt+1})")
-                return _parse_gemini_response(text_response)
-            except Exception as e:
-                err_str = str(e).lower()
-                last_error = str(e)
-                if "429" in err_str or "resource" in err_str or "quota" in err_str:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("choices"):
+                        text_response = data["choices"][0]["message"]["content"]
+                        if text_response:
+                            print(f"OpenRouter success on {model_name} (attempt {attempt+1})")
+                            return _parse_analysis_response(text_response)
+                        last_error = "Empty response"
+                        continue
+                if resp.status_code == 429:
                     wait_sec = (attempt + 1) * 5
-                    print(f"Gemini rate limit on {model_name}, waiting {wait_sec}s (attempt {attempt+1}/3)")
+                    print(f"OpenRouter 429 on {model_name}, waiting {wait_sec}s")
                     time.sleep(wait_sec)
                     continue
-                elif "404" in err_str or "not found" in err_str:
-                    print(f"Model {model_name} not found, skipping to next")
-                    break
-                elif "500" in err_str or "503" in err_str or "server" in err_str:
-                    print(f"Gemini server error on {model_name}, retrying...")
-                    time.sleep(3)
-                    continue
-                else:
-                    print(f"Gemini {model_name} error: {e}")
-                    break
+                last_error = f"HTTP {resp.status_code}: {resp.text[:150]}"
+                print(f"OpenRouter {model_name} error: {last_error}")
+                break
+            except requests.exceptions.Timeout:
+                print(f"OpenRouter {model_name} timeout, attempt {attempt+1}/2")
+                last_error = "Request timeout"
+                continue
+            except Exception as e:
+                last_error = str(e)
+                print(f"OpenRouter {model_name} error: {e}")
+                break
         print(f"Model {model_name} failed, trying next...")
-    return {"error": f"All Gemini models failed. Last error: {last_error}"}
+    return {"error": f"All AI models failed. Last error: {last_error}"}
 
 
 def _build_chart_analyzer_msg(result: dict) -> str:
