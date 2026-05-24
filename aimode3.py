@@ -3765,8 +3765,8 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
     if not update.message.photo:
         return
     last_use = _chart_analyzer_cooldown.get(uid, 0)
-    if time.time() - last_use < 10:
-        wait_left = int(10 - (time.time() - last_use))
+    if time.time() - last_use < 40:
+        wait_left = int(40 - (time.time() - last_use))
         cool_msg = f"⏳ Please wait {wait_left} seconds before sending another chart."
         entities = build_custom_emoji_entities(cool_msg)
         await update.message.reply_text(cool_msg, entities=entities)
