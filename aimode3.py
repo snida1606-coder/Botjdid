@@ -61,7 +61,7 @@ threading.Thread(target=run_uptime_server, daemon=True).start()
 BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
-GEMINI_API_KEY = "AIzaSyBA6LAITt1Bh8DNy2JoSZ0UFebh4sYjiOQ"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 def is_authorized(uid: int) -> bool:
     headers = {"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}", "Content-Type": "application/json"}
@@ -3552,78 +3552,58 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=uid, text=formatted)
     context.user_data['state'] = None
 
-# ══════════════ AI CHART ANALYZER (Gemini Vision) ══════════════
-GEMINI_MODELS = [
+# ══════════════ AI CHART ANALYZER (Gemini Vision via SDK) ══════════════
+from google import genai
+from google.genai import types as genai_types
+import io as _io
+
+_genai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+GEMINI_SDK_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash-latest",
 ]
 
 _chart_analyzer_cooldown: Dict[int, float] = {}
 
-def _compress_image_for_gemini(photo_bytes: bytes) -> str:
-    """Compress image to reduce size before sending to Gemini API."""
+CHART_ANALYSIS_PROMPT = (
+    "You are an expert technical analyst for binary options trading (Quotex platform, 1-minute timeframe). "
+    "Analyze this trading chart screenshot carefully and provide:\n\n"
+    "1. DIRECTION: Either CALL (price will go UP) or PUT (price will go DOWN) for the next 1-minute candle\n"
+    "2. CONFIDENCE: A percentage from 50-99 showing how confident you are\n"
+    "3. PATTERNS: List any candlestick patterns you see (e.g., Engulfing, Hammer, Doji, Morning Star, etc.)\n"
+    "4. TREND: Current trend direction (Bullish, Bearish, or Sideways)\n"
+    "5. SUPPORT_RESISTANCE: Key support and resistance levels visible on the chart\n"
+    "6. INDICATORS: Any technical indicators visible (RSI, EMA, Bollinger, etc.) and their readings\n"
+    "7. REASON: Brief explanation of why you chose this direction\n\n"
+    "IMPORTANT: You MUST respond in EXACTLY this format (one item per line):\n"
+    "DIRECTION: CALL or PUT\n"
+    "CONFIDENCE: number\n"
+    "PATTERNS: comma separated list\n"
+    "TREND: Bullish or Bearish or Sideways\n"
+    "SUPPORT: price level\n"
+    "RESISTANCE: price level\n"
+    "INDICATORS: summary\n"
+    "REASON: your explanation\n"
+    "PAIR: detected pair name if visible (e.g., EUR/USD) or UNKNOWN\n"
+)
+
+
+def _compress_image_for_gemini(photo_bytes: bytes) -> bytes:
+    """Compress image to reduce size before sending to Gemini API. Returns raw bytes."""
     try:
-        import io
-        img = Image.open(io.BytesIO(photo_bytes))
+        img = Image.open(_io.BytesIO(photo_bytes))
         max_dim = 1024
         if img.width > max_dim or img.height > max_dim:
             img.thumbnail((max_dim, max_dim), Image.LANCZOS)
         if img.mode == 'RGBA':
             img = img.convert('RGB')
-        buf = io.BytesIO()
+        buf = _io.BytesIO()
         img.save(buf, format='JPEG', quality=75)
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
+        return buf.getvalue()
     except Exception as e:
         print(f"Image compression failed, using raw: {e}")
-        return base64.b64encode(photo_bytes).decode('utf-8')
-
-
-def _gemini_call_with_retry(image_base64: str, prompt: str) -> requests.Response:
-    """Try Gemini API with retry + fallback models on 429/5xx errors."""
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 1024,
-        }
-    }
-    for model in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        for attempt in range(3):
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=45)
-                if resp.status_code == 200:
-                    print(f"Gemini success on {model} (attempt {attempt+1})")
-                    return resp
-                if resp.status_code == 429:
-                    wait_sec = (attempt + 1) * 5
-                    print(f"Gemini 429 on {model}, retrying in {wait_sec}s (attempt {attempt+1}/3)")
-                    time.sleep(wait_sec)
-                    continue
-                if resp.status_code >= 500:
-                    time.sleep(3)
-                    continue
-                if resp.status_code == 404:
-                    print(f"Gemini model {model} not found (404), skipping to next")
-                    break
-                print(f"Gemini {model} error {resp.status_code}: {resp.text[:200]}")
-                break
-            except requests.exceptions.Timeout:
-                print(f"Gemini {model} timeout, attempt {attempt+1}/3")
-                time.sleep(3)
-                continue
-            except Exception as e:
-                print(f"Gemini {model} error: {e}")
-                break
-        print(f"Model {model} failed, trying next fallback...")
-    return None
+        return photo_bytes
 
 
 def _parse_gemini_response(text_response: str) -> dict:
@@ -3661,41 +3641,51 @@ def _parse_gemini_response(text_response: str) -> dict:
     return result
 
 
-def _gemini_analyze_chart(image_base64: str) -> dict:
-    """Send chart image to Gemini Vision API and get trading signal analysis."""
-    prompt = (
-        "You are an expert technical analyst for binary options trading (Quotex platform, 1-minute timeframe). "
-        "Analyze this trading chart screenshot carefully and provide:\n\n"
-        "1. DIRECTION: Either CALL (price will go UP) or PUT (price will go DOWN) for the next 1-minute candle\n"
-        "2. CONFIDENCE: A percentage from 50-99 showing how confident you are\n"
-        "3. PATTERNS: List any candlestick patterns you see (e.g., Engulfing, Hammer, Doji, Morning Star, etc.)\n"
-        "4. TREND: Current trend direction (Bullish, Bearish, or Sideways)\n"
-        "5. SUPPORT_RESISTANCE: Key support and resistance levels visible on the chart\n"
-        "6. INDICATORS: Any technical indicators visible (RSI, EMA, Bollinger, etc.) and their readings\n"
-        "7. REASON: Brief explanation of why you chose this direction\n\n"
-        "IMPORTANT: You MUST respond in EXACTLY this format (one item per line):\n"
-        "DIRECTION: CALL or PUT\n"
-        "CONFIDENCE: number\n"
-        "PATTERNS: comma separated list\n"
-        "TREND: Bullish or Bearish or Sideways\n"
-        "SUPPORT: price level\n"
-        "RESISTANCE: price level\n"
-        "INDICATORS: summary\n"
-        "REASON: your explanation\n"
-        "PAIR: detected pair name if visible (e.g., EUR/USD) or UNKNOWN\n"
-    )
-    try:
-        resp = _gemini_call_with_retry(image_base64, prompt)
-        if resp is None:
-            return {"error": "All Gemini models are busy right now. Please wait 30 seconds and try again."}
-        data = resp.json()
-        text_response = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        if not text_response:
-            return {"error": "Empty response from Gemini"}
-        return _parse_gemini_response(text_response)
-    except Exception as e:
-        print(f"Gemini analysis error: {e}")
-        return {"error": str(e)}
+def _gemini_analyze_chart(image_bytes: bytes) -> dict:
+    """Send chart image to Gemini Vision API using official google-genai SDK with fallback models."""
+    if not _genai_client or not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY not set. Add it as environment variable on Render."}
+    compressed = _compress_image_for_gemini(image_bytes)
+    image_part = genai_types.Part.from_bytes(data=compressed, mime_type="image/jpeg")
+    last_error = None
+    for model_name in GEMINI_SDK_MODELS:
+        for attempt in range(3):
+            try:
+                print(f"Trying {model_name} (attempt {attempt+1}/3)...")
+                response = _genai_client.models.generate_content(
+                    model=model_name,
+                    contents=[CHART_ANALYSIS_PROMPT, image_part],
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=1024,
+                    ),
+                )
+                text_response = response.text
+                if not text_response:
+                    last_error = "Empty response from Gemini"
+                    continue
+                print(f"Gemini success on {model_name} (attempt {attempt+1})")
+                return _parse_gemini_response(text_response)
+            except Exception as e:
+                err_str = str(e).lower()
+                last_error = str(e)
+                if "429" in err_str or "resource" in err_str or "quota" in err_str:
+                    wait_sec = (attempt + 1) * 5
+                    print(f"Gemini rate limit on {model_name}, waiting {wait_sec}s (attempt {attempt+1}/3)")
+                    time.sleep(wait_sec)
+                    continue
+                elif "404" in err_str or "not found" in err_str:
+                    print(f"Model {model_name} not found, skipping to next")
+                    break
+                elif "500" in err_str or "503" in err_str or "server" in err_str:
+                    print(f"Gemini server error on {model_name}, retrying...")
+                    time.sleep(3)
+                    continue
+                else:
+                    print(f"Gemini {model_name} error: {e}")
+                    break
+        print(f"Model {model_name} failed, trying next...")
+    return {"error": f"All Gemini models failed. Last error: {last_error}"}
 
 
 def _build_chart_analyzer_msg(result: dict) -> str:
@@ -3772,8 +3762,7 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
         photo = update.message.photo[-1]
         photo_file = await context.bot.get_file(photo.file_id)
         photo_bytes = await photo_file.download_as_bytearray()
-        image_b64 = _compress_image_for_gemini(bytes(photo_bytes))
-        result = _gemini_analyze_chart(image_b64)
+        result = _gemini_analyze_chart(bytes(photo_bytes))
         analysis_msg = _build_chart_analyzer_msg(result)
         entities = build_custom_emoji_entities(analysis_msg)
         await context.bot.send_message(chat_id=uid, text=analysis_msg, entities=entities)
