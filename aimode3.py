@@ -3556,8 +3556,28 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
 ]
+
+_chart_analyzer_cooldown: Dict[int, float] = {}
+
+def _compress_image_for_gemini(photo_bytes: bytes) -> str:
+    """Compress image to reduce size before sending to Gemini API."""
+    try:
+        import io
+        img = Image.open(io.BytesIO(photo_bytes))
+        max_dim = 1024
+        if img.width > max_dim or img.height > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+        if img.mode == 'RGBA':
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=75)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        print(f"Image compression failed, using raw: {e}")
+        return base64.b64encode(photo_bytes).decode('utf-8')
+
 
 def _gemini_call_with_retry(image_base64: str, prompt: str) -> requests.Response:
     """Try Gemini API with retry + fallback models on 429/5xx errors."""
@@ -3578,22 +3598,26 @@ def _gemini_call_with_retry(image_base64: str, prompt: str) -> requests.Response
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
         for attempt in range(3):
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                resp = requests.post(url, json=payload, headers=headers, timeout=45)
                 if resp.status_code == 200:
+                    print(f"Gemini success on {model} (attempt {attempt+1})")
                     return resp
                 if resp.status_code == 429:
-                    wait_sec = (attempt + 1) * 3
+                    wait_sec = (attempt + 1) * 5
                     print(f"Gemini 429 on {model}, retrying in {wait_sec}s (attempt {attempt+1}/3)")
                     time.sleep(wait_sec)
                     continue
                 if resp.status_code >= 500:
-                    time.sleep(2)
+                    time.sleep(3)
                     continue
+                if resp.status_code == 404:
+                    print(f"Gemini model {model} not found (404), skipping to next")
+                    break
                 print(f"Gemini {model} error {resp.status_code}: {resp.text[:200]}")
                 break
             except requests.exceptions.Timeout:
                 print(f"Gemini {model} timeout, attempt {attempt+1}/3")
-                time.sleep(2)
+                time.sleep(3)
                 continue
             except Exception as e:
                 print(f"Gemini {model} error: {e}")
@@ -3733,6 +3757,14 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
         return
     if not update.message.photo:
         return
+    last_use = _chart_analyzer_cooldown.get(uid, 0)
+    if time.time() - last_use < 10:
+        wait_left = int(10 - (time.time() - last_use))
+        cool_msg = f"⏳ Please wait {wait_left} seconds before sending another chart."
+        entities = build_custom_emoji_entities(cool_msg)
+        await update.message.reply_text(cool_msg, entities=entities)
+        return
+    _chart_analyzer_cooldown[uid] = time.time()
     wait_msg = "📸 𝙲𝚑𝚊𝚛𝚝 𝚛𝚎𝚌𝚎𝚒𝚟𝚎𝚍! 🤖 𝙰𝚗𝚊𝚕𝚢𝚣𝚒𝚗𝚐 𝚠𝚒𝚝𝚑 𝙰𝙸...\n⏳ Please wait 10-20 seconds (auto-retry if busy)..."
     entities = build_custom_emoji_entities(wait_msg)
     processing_msg = await update.message.reply_text(wait_msg, entities=entities)
@@ -3740,7 +3772,7 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
         photo = update.message.photo[-1]
         photo_file = await context.bot.get_file(photo.file_id)
         photo_bytes = await photo_file.download_as_bytearray()
-        image_b64 = base64.b64encode(bytes(photo_bytes)).decode('utf-8')
+        image_b64 = _compress_image_for_gemini(bytes(photo_bytes))
         result = _gemini_analyze_chart(image_b64)
         analysis_msg = _build_chart_analyzer_msg(result)
         entities = build_custom_emoji_entities(analysis_msg)
