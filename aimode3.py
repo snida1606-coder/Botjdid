@@ -58,7 +58,7 @@ threading.Thread(target=run_uptime_server, daemon=True).start()
 
 
 # ══════════════ CONFIG ══════════════
-BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
+BOT_TOKEN = "7623409497:AAECia8u02Vwj4QOdBweRDwMlihn3n3RW38"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -3563,27 +3563,35 @@ OPENROUTER_MODELS = [
 ]
 
 _chart_analyzer_cooldown: Dict[int, float] = {}
+_chart_analyzer_daily_usage: Dict[int, list] = {}
+CHART_DAILY_LIMIT = 15
 
 CHART_ANALYSIS_PROMPT = (
-    "You are an expert technical analyst for binary options trading (Quotex platform, 1-minute timeframe). "
-    "Analyze this trading chart screenshot carefully and provide:\n\n"
-    "1. DIRECTION: Either CALL (price will go UP) or PUT (price will go DOWN) for the next 1-minute candle\n"
-    "2. CONFIDENCE: A percentage from 50-99 showing how confident you are\n"
-    "3. PATTERNS: List any candlestick patterns you see (e.g., Engulfing, Hammer, Doji, Morning Star, etc.)\n"
-    "4. TREND: Current trend direction (Bullish, Bearish, or Sideways)\n"
-    "5. SUPPORT_RESISTANCE: Key support and resistance levels visible on the chart\n"
-    "6. INDICATORS: Any technical indicators visible (RSI, EMA, Bollinger, etc.) and their readings\n"
-    "7. REASON: Brief explanation of why you chose this direction\n\n"
-    "IMPORTANT: You MUST respond in EXACTLY this format (one item per line):\n"
+    "You are an expert technical analyst specializing in binary options trading on the Quotex platform with 1-minute timeframe. "
+    "You MUST analyze this trading chart screenshot with extreme precision and detail.\n\n"
+    "ANALYSIS STEPS:\n"
+    "1. Identify the currency pair from the chart title/header. If not visible, look for price levels to determine the pair.\n"
+    "2. Study the last 5-10 candles closely for candlestick patterns (Engulfing, Hammer, Doji, Pin Bar, Morning/Evening Star, Three Soldiers/Crows, Harami, etc.)\n"
+    "3. Determine the trend by looking at the overall price movement direction and any moving averages visible.\n"
+    "4. Identify key support levels (where price bounced UP from) and resistance levels (where price bounced DOWN from).\n"
+    "5. Check any visible indicators (RSI, MACD, EMA, Bollinger Bands, Stochastic, etc.) and their current readings.\n"
+    "6. Based on ALL of the above, decide if the next 1-minute candle will go UP (CALL) or DOWN (PUT).\n\n"
+    "RULES:\n"
+    "- You MUST identify at least one candlestick pattern. Look carefully at candle shapes, wicks, and bodies.\n"
+    "- You MUST estimate support and resistance levels from the chart even if approximate.\n"
+    "- You MUST provide a specific, detailed reason for your direction choice.\n"
+    "- NEVER respond with N/A, None, or Unknown for patterns, support, or resistance. Always give your best estimate.\n"
+    "- Confidence should reflect your actual certainty: 50-65 = low, 66-80 = medium, 81-99 = high.\n\n"
+    "RESPOND in EXACTLY this format (one item per line, no extra text):\n"
     "DIRECTION: CALL or PUT\n"
-    "CONFIDENCE: number\n"
-    "PATTERNS: comma separated list\n"
+    "CONFIDENCE: number between 50-99\n"
+    "PATTERNS: list of detected patterns (e.g., Bullish Engulfing, Hammer, Doji)\n"
     "TREND: Bullish or Bearish or Sideways\n"
-    "SUPPORT: price level\n"
-    "RESISTANCE: price level\n"
-    "INDICATORS: summary\n"
-    "REASON: your explanation\n"
-    "PAIR: detected pair name if visible (e.g., EUR/USD) or UNKNOWN\n"
+    "SUPPORT: price level (e.g., 1.0845)\n"
+    "RESISTANCE: price level (e.g., 1.0890)\n"
+    "INDICATORS: what indicators you see and their readings\n"
+    "REASON: detailed explanation of why you chose this direction based on the patterns and indicators\n"
+    "PAIR: currency pair name (e.g., EUR/USD, GBP/JPY) or best guess from price levels\n"
 )
 
 
@@ -3764,7 +3772,19 @@ async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(cool_msg, entities=entities)
         return
     _chart_analyzer_cooldown[uid] = time.time()
-    wait_msg = "📸 𝙲𝚑𝚊𝚛𝚝 𝚛𝚎𝚌𝚎𝚒𝚟𝚎𝚍! 🤖 𝙰𝚗𝚊𝚕𝚢𝚣𝚒𝚗𝚐 𝚠𝚒𝚝𝚑 𝙰𝙸...\n⏳ Please wait 10-20 seconds (auto-retry if busy)..."
+    today = datetime.now(timezone(timedelta(hours=5))).strftime("%Y-%m-%d")
+    if uid in _chart_analyzer_daily_usage:
+        _chart_analyzer_daily_usage[uid] = [d for d in _chart_analyzer_daily_usage[uid] if d == today]
+    else:
+        _chart_analyzer_daily_usage[uid] = []
+    if len(_chart_analyzer_daily_usage[uid]) >= CHART_DAILY_LIMIT:
+        limit_msg = f"\u26a0\ufe0f Daily limit reached! You can analyze {CHART_DAILY_LIMIT} charts per day.\n\u23f3 Limit resets at midnight (UTC+5)."
+        entities = build_custom_emoji_entities(limit_msg)
+        await update.message.reply_text(limit_msg, entities=entities)
+        return
+    _chart_analyzer_daily_usage[uid].append(today)
+    remaining = CHART_DAILY_LIMIT - len(_chart_analyzer_daily_usage[uid])
+    wait_msg = f"\U0001f4f8 \U0001d672\U0001d691\U0001d68a\U0001d69b\U0001d69d \U0001d69b\U0001d68e\U0001d68c\U0001d68e\U0001d692\U0001d69f\U0001d68e\U0001d68d! \U0001f916 \U0001d670\U0001d697\U0001d68a\U0001d695\U0001d6a2\U0001d6a3\U0001d692\U0001d697\U0001d690 \U0001d6a0\U0001d692\U0001d69d\U0001d691 \U0001d682\U0001d67c\U0001d689 \U0001d670\U0001d678...\n\u23f3 Please wait 10-20 seconds... ({remaining} analyses left today)"
     entities = build_custom_emoji_entities(wait_msg)
     processing_msg = await update.message.reply_text(wait_msg, entities=entities)
     try:
@@ -3798,7 +3818,7 @@ def main():
 
     API_ID = 14017996
     API_HASH = "c04b4a519be12de0cf2826fde7c0ba9a"
-    BOT_TOKEN_SENDER = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
+    BOT_TOKEN_SENDER = "7623409497:AAECia8u02Vwj4QOdBweRDwMlihn3n3RW38"
     sender.start_with_bot_token(API_ID, API_HASH, BOT_TOKEN_SENDER)
 
     app = Application.builder().token(BOT_TOKEN).build()
