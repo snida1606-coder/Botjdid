@@ -2683,6 +2683,7 @@ STATE_MM_TP = 30
 STATE_MM_SL = 31
 STATE_AI_MIN_CONSENSUS = 32
 STATE_AI_REQUIRED_STRATS = 33
+STATE_CHART_ANALYZER = 34
 
 # ══════════════ HELPER FUNCTIONS FOR BUTTONS & ENTITIES ══════════════
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
@@ -2718,13 +2719,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"10. 🐶Text Formatter – reformat signal lists\n"
         f"11. 🐶 Font Changer – apply text styles\n"
         f"12. 📺 Trend Filter – Ai trend filter\n"
-        f"13. 🤭 Help – contact support\n\n"
+        f"13. 📸 AI Chart Analyzer – send chart screenshot\n"
+        f"14. 🤭 Help – contact support\n\n"
         f"💎 Choose an option below to continue.\n\n"
         f"©OWNER @Rohailtrader ✨"
     )
     bold_words = ["AI Mode", "Start Trading", "Signal Checker", "Future Signals", "Backtest",
                   "UTC Converter", "Pair Payout%", "Market Trend", "Candle Colors",
-                  "Text Formatter", "Font Changer", "Trend Filter", "Help", "SMZXV4.3"]
+                  "Text Formatter", "Font Changer", "Trend Filter", "AI Chart Analyzer", "Help", "SMZXV4.3"]
     extra_entities = []
     for word in bold_words:
         idx = text.find(word)
@@ -2744,6 +2746,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [colored_button(" Text Formatter", "menu_text_formatter", KeyboardButtonStyle.PRIMARY, "5282843764451195532"),
          colored_button(" Font Changer", "menu_font_changer", KeyboardButtonStyle.PRIMARY, "6282685788450721937")],
         [colored_button(" Trend Filter", "menu_trend_filter", KeyboardButtonStyle.SUCCESS, "5316681209026191987")],
+        [colored_button(" AI Chart Analyzer", "menu_chart_analyzer", KeyboardButtonStyle.SUCCESS, "5854710508065658472")],
         [colored_button(" Help", "menu_admin", KeyboardButtonStyle.DANGER, "6062294201696000196")],
     ]
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -2816,6 +2819,22 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_trend_filter":
         context.user_data['state'] = STATE_TREND_FILTER_INPUT
         sender.send_message(uid, "📉 **Trend Filter**\n\nPaste your signal list (one per line).\nFormat: pair;time;direction (or any readable format).\n\nI will check the previous 1‑hour trend and filter accordingly.")
+    elif data == "menu_chart_analyzer":
+        context.user_data['state'] = STATE_CHART_ANALYZER
+        context.user_data['uid'] = uid
+        msg = (
+            "📸 𝙰𝙸 𝙲𝙷𝙰𝚁𝚃 𝙰𝙽𝙰𝙻𝚈𝚉𝙴𝚁\n\n"
+            "🔰 𝚂𝚎𝚗𝚍 𝚖𝚎 𝚊 𝚌𝚑𝚊𝚛𝚝 𝚜𝚌𝚛𝚎𝚎𝚗𝚜𝚑𝚘𝚝 𝚊𝚗𝚍 𝙸 𝚠𝚒𝚕𝚕 𝚊𝚗𝚊𝚕𝚢𝚣𝚎 𝚒𝚝!\n\n"
+            "💎 I will detect:\n"
+            "  📊 Candlestick patterns\n"
+            "  📈 Trend direction\n"
+            "  🔥 Support & Resistance\n"
+            "  🤖 Next 1-min signal (CALL/PUT)\n\n"
+            "📸 Send your chart screenshot now..."
+        )
+        entities = build_custom_emoji_entities(msg)
+        await query.message.reply_text(msg, entities=entities)
+        return
     elif data == "menu_admin":
         sender.send_message(uid, "🤭 Contact @Rohailtrader")
 
@@ -3533,6 +3552,176 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=uid, text=formatted)
     context.user_data['state'] = None
 
+# ══════════════ AI CHART ANALYZER (Gemini Vision) ══════════════
+def _gemini_analyze_chart(image_base64: str) -> dict:
+    """Send chart image to Gemini Vision API and get trading signal analysis."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    prompt = (
+        "You are an expert technical analyst for binary options trading (Quotex platform, 1-minute timeframe). "
+        "Analyze this trading chart screenshot carefully and provide:\n\n"
+        "1. DIRECTION: Either CALL (price will go UP) or PUT (price will go DOWN) for the next 1-minute candle\n"
+        "2. CONFIDENCE: A percentage from 50-99 showing how confident you are\n"
+        "3. PATTERNS: List any candlestick patterns you see (e.g., Engulfing, Hammer, Doji, Morning Star, etc.)\n"
+        "4. TREND: Current trend direction (Bullish, Bearish, or Sideways)\n"
+        "5. SUPPORT_RESISTANCE: Key support and resistance levels visible on the chart\n"
+        "6. INDICATORS: Any technical indicators visible (RSI, EMA, Bollinger, etc.) and their readings\n"
+        "7. REASON: Brief explanation of why you chose this direction\n\n"
+        "IMPORTANT: You MUST respond in EXACTLY this format (one item per line):\n"
+        "DIRECTION: CALL or PUT\n"
+        "CONFIDENCE: number\n"
+        "PATTERNS: comma separated list\n"
+        "TREND: Bullish or Bearish or Sideways\n"
+        "SUPPORT: price level\n"
+        "RESISTANCE: price level\n"
+        "INDICATORS: summary\n"
+        "REASON: your explanation\n"
+        "PAIR: detected pair name if visible (e.g., EUR/USD) or UNKNOWN\n"
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 1024,
+        }
+    }
+    headers = {"Content-Type": "application/json"}
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            print(f"Gemini API error: {resp.status_code} - {resp.text[:200]}")
+            return {"error": f"Gemini API error: {resp.status_code}"}
+        data = resp.json()
+        text_response = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        if not text_response:
+            return {"error": "Empty response from Gemini"}
+        result = {"raw": text_response}
+        for line in text_response.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("DIRECTION:"):
+                val = line.split(":", 1)[1].strip().upper()
+                result["direction"] = "CALL" if "CALL" in val else "PUT" if "PUT" in val else val
+            elif line.upper().startswith("CONFIDENCE:"):
+                try:
+                    num = re.search(r'\d+', line.split(":", 1)[1])
+                    result["confidence"] = int(num.group()) if num else 75
+                except Exception:
+                    result["confidence"] = 75
+            elif line.upper().startswith("PATTERNS:"):
+                result["patterns"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("TREND:"):
+                result["trend"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("SUPPORT:"):
+                result["support"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("RESISTANCE:"):
+                result["resistance"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("INDICATORS:"):
+                result["indicators"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("REASON:"):
+                result["reason"] = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("PAIR:"):
+                result["pair"] = line.split(":", 1)[1].strip()
+        if "direction" not in result:
+            result["direction"] = "CALL" if "CALL" in text_response.upper() else "PUT"
+        if "confidence" not in result:
+            result["confidence"] = 75
+        return result
+    except requests.exceptions.Timeout:
+        return {"error": "Gemini API timeout — try again"}
+    except Exception as e:
+        print(f"Gemini analysis error: {e}")
+        return {"error": str(e)}
+
+
+def _build_chart_analyzer_msg(result: dict) -> str:
+    """Build formatted message from Gemini chart analysis result."""
+    if "error" in result:
+        return (
+            "❀° ┄────────=─────────╮\n"
+            "   📸 𝙲𝙷𝙰𝚁𝚃 𝙰𝙽𝙰𝙻𝚈𝚉𝙴𝚁 📸\n"
+            "╰────────=───=─────┄ °❀\n\n"
+            f"❌ Analysis failed: {result['error']}\n"
+            "⏳ Please try again with a clearer chart screenshot."
+        )
+    direction = result.get("direction", "CALL")
+    confidence = result.get("confidence", 75)
+    patterns = result.get("patterns", "None detected")
+    trend = result.get("trend", "Unknown")
+    support = result.get("support", "N/A")
+    resistance = result.get("resistance", "N/A")
+    indicators = result.get("indicators", "N/A")
+    reason = result.get("reason", "Based on chart analysis")
+    pair = result.get("pair", "UNKNOWN")
+    dir_emoji = "📉" if direction == "CALL" else "📈"
+    now_utc5 = datetime.now(timezone.utc) + timedelta(hours=5)
+    entry_time = (now_utc5.replace(second=0, microsecond=0) + timedelta(minutes=1)).strftime("%H:%M")
+    conf_bar = "█" * (confidence // 10) + "░" * (10 - confidence // 10)
+    msg = (
+        f"❀° ┄────────=─────────╮\n"
+        f"   📸 𝙲𝙷𝙰𝚁𝚃 𝙰𝙽𝙰𝙻𝚈𝚉𝙴𝚁 📸\n"
+        f"╰────────=───=─────┄ °❀\n"
+        f"┏───♡─────────── ⊹˚───┓\n"
+        f"📊 Pair∶— {fancy_font(pair)}\n"
+        f"{dir_emoji} Direction∶— {fancy_font(direction)}\n"
+        f"💎 Confidence∶— {fancy_font(str(confidence) + '%')}\n"
+        f"⏰ Entry∶— {fancy_font(entry_time)}\n"
+        f"📊 [{conf_bar}] {confidence}%\n"
+        f"┗───˚⊹ ─────────♡───┛\n\n"
+        f"🔥 𝙰𝚗𝚊𝚕𝚢𝚜𝚒𝚜 𝙳𝚎𝚝𝚊𝚒𝚕𝚜\n"
+        f"📈 Trend∶ {fancy_font(trend)}\n"
+        f"🔰 Patterns∶ {fancy_font(patterns)}\n"
+        f"💲 Support∶ {fancy_font(support)}\n"
+        f"🚀 Resistance∶ {fancy_font(resistance)}\n"
+        f"📺 Indicators∶ {fancy_font(indicators)}\n\n"
+        f"🤖 𝚁𝚎𝚊𝚜𝚘𝚗\n"
+        f"💪 {reason}\n\n"
+        f"⚠️ Trade on next 1-min candle at {fancy_font(entry_time)}\n"
+        f"✨ ©OWNER @Rohailtrader ✨"
+    )
+    return msg
+
+
+async def chart_analyzer_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages when user is in Chart Analyzer mode."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    state = context.user_data.get('state')
+    if state != STATE_CHART_ANALYZER:
+        return
+    if not update.message.photo:
+        return
+    wait_msg = "📸 𝙲𝚑𝚊𝚛𝚝 𝚛𝚎𝚌𝚎𝚒𝚟𝚎𝚍! 🤖 𝙰𝚗𝚊𝚕𝚢𝚣𝚒𝚗𝚐 𝚠𝚒𝚝𝚑 𝙰𝙸...\n⏳ Please wait 5-10 seconds..."
+    entities = build_custom_emoji_entities(wait_msg)
+    processing_msg = await update.message.reply_text(wait_msg, entities=entities)
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await photo_file.download_as_bytearray()
+        image_b64 = base64.b64encode(bytes(photo_bytes)).decode('utf-8')
+        result = _gemini_analyze_chart(image_b64)
+        analysis_msg = _build_chart_analyzer_msg(result)
+        entities = build_custom_emoji_entities(analysis_msg)
+        await context.bot.send_message(chat_id=uid, text=analysis_msg, entities=entities)
+        try:
+            await processing_msg.delete()
+        except Exception:
+            pass
+        follow_up = "📸 Send another chart screenshot to analyze, or use /stop to return to menu."
+        f_entities = build_custom_emoji_entities(follow_up)
+        await context.bot.send_message(chat_id=uid, text=follow_up, entities=f_entities)
+    except Exception as e:
+        print(f"Chart analyzer error: {e}")
+        err_msg = f"❌ Error analyzing chart: {str(e)}\n⏳ Please try again with a different screenshot."
+        entities = build_custom_emoji_entities(err_msg)
+        await context.bot.send_message(chat_id=uid, text=err_msg, entities=entities)
+
+
 # ══════════════ MAIN FUNCTION ══════════════
 def main():
     global bot_instance
@@ -3594,6 +3783,7 @@ def main():
     app.add_handler(CommandHandler("checker", checker_cmd))
     app.add_handler(CommandHandler("futuresignal", future_cmd))
 
+    app.add_handler(MessageHandler(filters.PHOTO, chart_analyzer_photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
     app.add_handler(CallbackQueryHandler(fut_pair_callback, pattern="^pair_"))
     app.add_handler(CallbackQueryHandler(font_style_callback, pattern="^font_"))
