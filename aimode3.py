@@ -2241,6 +2241,147 @@ def generate_future_signals(uid, min_conf=75, start_time="00:00", end_time="23:5
     all_signals.sort(key=lambda x: time_to_min(x['time']))
     return build_future_signal_header(all_signals)
 
+# ══════════════ SMZ HACKING MODE (via sio.tools catalog) ══════════════
+SMZ_HACK_DEFAULT_ASSETS = [
+    "ATOUSD-OTC", "AXSUSD-OTC", "BNBUSD-OTC", "BTCUSD-OTC",
+    "DOTUSD-OTC", "ETHUSD-OTC", "INTC-OTC", "MCD-OTC",
+    "PFE-OTC", "TRUUSD-OTC"
+]
+
+def _smz_hack_time_user_to_api(time_str, user_tz=5, api_tz=-3):
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        user_dt = datetime.strptime(f"{today.date()} {time_str}", "%Y-%m-%d %H:%M")
+        api_dt = user_dt - timedelta(hours=(user_tz - api_tz))
+        return api_dt.strftime("%H:%M")
+    except:
+        return time_str
+
+def _smz_hack_time_api_to_user(time_str, user_tz=5, api_tz=-3):
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        api_dt = datetime.strptime(f"{today.date()} {time_str}", "%Y-%m-%d %H:%M")
+        user_dt = api_dt + timedelta(hours=(user_tz - api_tz))
+        return user_dt.strftime("%H:%M")
+    except:
+        return time_str
+
+def _fix_timeframe(tf):
+    mapping = {"1": "M1", "5": "M5", "15": "M15", "60": "H1", "30": "M30",
+               "m1": "M1", "m5": "M5", "m15": "M15", "h1": "H1", "m30": "M30"}
+    return mapping.get(str(tf).strip().lower(), tf.upper() if tf else "M1")
+
+def run_smz_hacking_mode(uid, days, start_time, end_time, timeframe):
+    BASE_SIO = "https://sio.tools"
+    CREATE_ENDPOINT = "/catalogadorquotex/catalog_signals_async"
+    JOB_ENDPOINT = "/catalogadorquotex/catalog_signals"
+
+    start_api = _smz_hack_time_user_to_api(start_time)
+    end_api = _smz_hack_time_user_to_api(end_time)
+    tf = _fix_timeframe(timeframe)
+
+    payload = {
+        "timeframes": [tf],
+        "assets": SMZ_HACK_DEFAULT_ASSETS,
+        "days": days,
+        "directions": ["CALL", "PUT"],
+        "startTime": start_api,
+        "endTime": end_api,
+        "rates": {"fixed": 100}
+    }
+
+    try:
+        resp = requests.post(
+            BASE_SIO + CREATE_ENDPOINT, json=payload,
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            timeout=30
+        )
+        if resp.status_code != 200 or not resp.json().get("running"):
+            sender.send_message(uid, "❌ Failed to create signal job. Try again later.")
+            return
+        job_id = resp.json().get("id")
+        sender.send_message(uid, f"🔥 𝙹𝚘𝚋 𝚌𝚛𝚎𝚊𝚝𝚎𝚍! 𝙸𝙳: {job_id}\n⏳ Loading signals... (may take 30-60 seconds)")
+    except Exception as e:
+        sender.send_message(uid, f"❌ Connection error: {e}")
+        return
+
+    signals_api = []
+    for attempt in range(1, 41):
+        try:
+            resp = requests.get(
+                f"{BASE_SIO}{JOB_ENDPOINT}/{job_id}",
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=30
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "finished":
+                    signals_api = data.get("signals", [])
+                    break
+        except:
+            pass
+        time.sleep(3)
+    else:
+        sender.send_message(uid, "❌ Timeout waiting for signals. Try again.")
+        return
+
+    if not signals_api:
+        sender.send_message(uid, "❌ No signals found for the given parameters.")
+        return
+
+    signals_utc5 = []
+    for sig in signals_api:
+        parts = sig.split(";")
+        if len(parts) >= 4:
+            time_user = _smz_hack_time_api_to_user(parts[2])
+            signals_utc5.append({
+                "asset": parts[0],
+                "tf": parts[1],
+                "time": time_user,
+                "direction": parts[3].upper()
+            })
+
+    signals_utc5.sort(key=lambda x: time_to_min(x['time']))
+
+    header = (
+        "❀° ┄────────=─────────╮\n"
+        "   🥷 𝚂𝙼𝚉 𝙷𝙰𝙲𝙺𝙸𝙽𝙶 𝙼𝙾𝙳𝙴 🥷\n"
+        "╰────────=───=─────┄ °❀\n\n"
+        f"📊 Signals: {len(signals_utc5)}\n"
+        f"📅 Days analyzed: {days}\n"
+        f"⏰ Time range: {start_time} - {end_time} (UTC+5)\n"
+        f"⏳ Timeframe: {tf}\n\n"
+        "┏───♡─────────── ⊹˚───┓\n"
+    )
+
+    signal_lines = []
+    for i, sig in enumerate(signals_utc5, 1):
+        direction_emoji = "📈" if sig['direction'] == "CALL" else "📉"
+        signal_lines.append(
+            f"{direction_emoji} {sig['asset']} │ {sig['time']} │ {sig['direction']}"
+        )
+
+    footer = (
+        "\n┗───˚⊹ ─────────♡───┛\n\n"
+        "✨ ©OWNER @Rohailtrader ✨"
+    )
+
+    full_msg = header + "\n".join(signal_lines) + footer
+    if len(full_msg) > 4000:
+        chunks = []
+        current = header
+        for line in signal_lines:
+            if len(current) + len(line) + 2 > 3900:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        current += footer
+        chunks.append(current)
+        for chunk in chunks:
+            sender.send_message(uid, chunk)
+    else:
+        sender.send_message(uid, full_msg)
+
+
 # ══════════════ BACKTEST (via sio.tools) ══════════════
 def run_backtest_sio(uid, start_date, end_date, signals_text):
     BASE_URL = "https://sio.tools"
@@ -2685,6 +2826,10 @@ STATE_MM_SL = 31
 STATE_AI_MIN_CONSENSUS = 32
 STATE_AI_REQUIRED_STRATS = 33
 STATE_CHART_ANALYZER = 34
+STATE_SMZ_HACK_DAYS = 35
+STATE_SMZ_HACK_START = 36
+STATE_SMZ_HACK_END = 37
+STATE_SMZ_HACK_TIMEFRAME = 38
 
 # ══════════════ HELPER FUNCTIONS FOR BUTTONS & ENTITIES ══════════════
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
@@ -2795,9 +2940,33 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         entities = build_custom_emoji_entities(text)
         await query.message.reply_text(text, entities=entities, reply_markup=markup)
     elif data == "menu_futuresignal":
-        context.user_data['state'] = STATE_FUT_MIN_CONF
         context.user_data['strategy_active'] = False
+        fut_text = (
+            "🔥 𝙵𝚄𝚃𝚄𝚁𝙴 𝚂𝙸𝙶𝙽𝙰𝙻𝚂\n\n"
+            "📊 Select Strategy:\n\n"
+            "🚀 Strategy 1 – SMZ Future OTC\n"
+            "   └ Generate signals from probability API\n\n"
+            "🥷 Strategy 2 – SMZ Hacking Mode\n"
+            "   └ Advanced signals from SIO catalog\n"
+        )
+        fut_buttons = [
+            [colored_button(" Strategy 1 – SMZ Future", "fut_strategy_1", KeyboardButtonStyle.SUCCESS, "6147654280112248427")],
+            [colored_button(" Strategy 2 – SMZ Hacking", "fut_strategy_2", KeyboardButtonStyle.PRIMARY, "6217370240800527004")],
+        ]
+        entities = build_custom_emoji_entities(fut_text)
+        await query.message.reply_text(fut_text, entities=entities, reply_markup=InlineKeyboardMarkup(fut_buttons))
+    elif data == "fut_strategy_1":
+        context.user_data['state'] = STATE_FUT_MIN_CONF
         sender.send_message(uid, "😈 Enter minimum confidence % (0-100):")
+    elif data == "fut_strategy_2":
+        context.user_data['state'] = STATE_SMZ_HACK_DAYS
+        msg = (
+            "🥷 𝚂𝙼𝚉 𝙷𝙰𝙲𝙺𝙸𝙽𝙶 𝙼𝙾𝙳𝙴\n\n"
+            "📅 Enter number of days to analyze (1-30):\n"
+            "   𝘾.g. 8 for last 8 days of data"
+        )
+        entities = build_custom_emoji_entities(msg)
+        await query.message.reply_text(msg, entities=entities)
     elif data == "menu_backtest":
         context.user_data['state'] = STATE_BACKTEST_START
         context.user_data['strategy_active'] = False
@@ -3385,6 +3554,43 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data['state'] = 'fut_pair_type'
         else:
             sender.send_message(uid, "Invalid format. Use HH:MM.")
+    elif state == STATE_SMZ_HACK_DAYS:
+        try:
+            val = int(clean_int_input(text))
+            if 1 <= val <= 30:
+                context.user_data['smz_hack_days'] = val
+                context.user_data['state'] = STATE_SMZ_HACK_START
+                msg = "⏰ Enter start time (HH:MM, UTC+5):\n   𝙴.𝚐. 08:00"
+                entities = build_custom_emoji_entities(msg)
+                await update.message.reply_text(msg, entities=entities)
+            else:
+                sender.send_message(uid, "❌ Enter between 1-30:")
+        except ValueError:
+            sender.send_message(uid, "❌ Invalid number. Enter days (1-30):")
+    elif state == STATE_SMZ_HACK_START:
+        if re.match(r'^\d{2}:\d{2}$', text):
+            context.user_data['smz_hack_start'] = text
+            context.user_data['state'] = STATE_SMZ_HACK_END
+            msg = "⏰ Enter end time (HH:MM, UTC+5):\n   𝙴.𝚐. 16:30"
+            entities = build_custom_emoji_entities(msg)
+            await update.message.reply_text(msg, entities=entities)
+        else:
+            sender.send_message(uid, "❌ Invalid format. Use HH:MM (e.g. 08:00)")
+    elif state == STATE_SMZ_HACK_END:
+        if re.match(r'^\d{2}:\d{2}$', text):
+            context.user_data['smz_hack_end'] = text
+            context.user_data['state'] = STATE_SMZ_HACK_TIMEFRAME
+            tf_buttons = [
+                [colored_button(" M1 (1 min)", "smz_tf_M1", KeyboardButtonStyle.SUCCESS, "6145553439809084250"),
+                 colored_button(" M5 (5 min)", "smz_tf_M5", KeyboardButtonStyle.PRIMARY, "6145553439809084250")],
+                [colored_button(" M15 (15 min)", "smz_tf_M15", KeyboardButtonStyle.PRIMARY, "6145553439809084250"),
+                 colored_button(" M30 (30 min)", "smz_tf_M30", KeyboardButtonStyle.PRIMARY, "6145553439809084250")],
+            ]
+            msg = "⏱️ Select timeframe:"
+            entities = build_custom_emoji_entities(msg)
+            await update.message.reply_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(tf_buttons))
+        else:
+            sender.send_message(uid, "❌ Invalid format. Use HH:MM (e.g. 16:30)")
     elif state == STATE_BACKTEST_START:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', text):
             context.user_data['backtest_start'] = text
@@ -3523,6 +3729,24 @@ async def fut_pair_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "pair_custom":
         await query.edit_message_text("📊 Enter pairs (comma-separated), e.g., EURUSD_OTC,GBPUSD_OTC:")
         context.user_data['state'] = STATE_FUT_CUSTOM_PAIRS
+
+async def smz_tf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_authorized(uid):
+        await query.answer("⛔ Access denied.", show_alert=True)
+        return
+    await query.answer()
+    data = query.data
+    tf = data.replace("smz_tf_", "")
+    days = context.user_data.get('smz_hack_days', 8)
+    start = context.user_data.get('smz_hack_start', '08:00')
+    end = context.user_data.get('smz_hack_end', '16:30')
+    context.user_data['state'] = None
+    msg = f"🥷 𝚂𝙼𝚉 𝙷𝚊𝚌𝚔𝚒𝚗𝚐 𝙼𝚘𝚍𝚎 𝚜𝚝𝚊𝚛𝚝𝚎𝚍!\n⏳ Fetching signals ({days} days, {start}-{end}, {tf})...\n\n🔥 Please wait 30-60 seconds..."
+    entities = build_custom_emoji_entities(msg)
+    await query.message.reply_text(msg, entities=entities)
+    threading.Thread(target=run_smz_hacking_mode, args=(uid, days, start, end, tf), daemon=True).start()
 
 async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3872,7 +4096,9 @@ def main():
 
     app.add_handler(MessageHandler(filters.PHOTO, chart_analyzer_photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^fut_strategy_"))
     app.add_handler(CallbackQueryHandler(fut_pair_callback, pattern="^pair_"))
+    app.add_handler(CallbackQueryHandler(smz_tf_callback, pattern="^smz_tf_"))
     app.add_handler(CallbackQueryHandler(font_style_callback, pattern="^font_"))
     app.add_handler(CommandHandler("continue", continue_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
