@@ -3781,9 +3781,9 @@ async def font_style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 import io as _io
 
 OPENROUTER_MODELS = [
-    "nvidia/nemotron-nano-12b-v2-vl:free",
     "google/gemma-4-31b-it:free",
-    "deepseek/deepseek-v4-flash:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "google/gemma-4-26b-a4b-it:free",
 ]
 
 _chart_analyzer_cooldown: Dict[int, float] = {}
@@ -3791,31 +3791,36 @@ _chart_analyzer_daily_usage: Dict[int, list] = {}
 CHART_DAILY_LIMIT = 15
 
 CHART_ANALYSIS_PROMPT = (
-    "You are an expert technical analyst specializing in binary options trading on the Quotex platform with 1-minute timeframe. "
-    "You MUST analyze this trading chart screenshot with extreme precision and detail.\n\n"
-    "ANALYSIS STEPS:\n"
-    "1. Identify the currency pair from the chart title/header. If not visible, look for price levels to determine the pair.\n"
-    "2. Study the last 5-10 candles closely for candlestick patterns (Engulfing, Hammer, Doji, Pin Bar, Morning/Evening Star, Three Soldiers/Crows, Harami, etc.)\n"
-    "3. Determine the trend by looking at the overall price movement direction and any moving averages visible.\n"
-    "4. Identify key support levels (where price bounced UP from) and resistance levels (where price bounced DOWN from).\n"
-    "5. Check any visible indicators (RSI, MACD, EMA, Bollinger Bands, Stochastic, etc.) and their current readings.\n"
-    "6. Based on ALL of the above, decide if the next 1-minute candle will go UP (CALL) or DOWN (PUT).\n\n"
-    "RULES:\n"
-    "- You MUST identify at least one candlestick pattern. Look carefully at candle shapes, wicks, and bodies.\n"
-    "- You MUST estimate support and resistance levels from the chart even if approximate.\n"
-    "- You MUST provide a specific, detailed reason for your direction choice.\n"
-    "- NEVER respond with N/A, None, or Unknown for patterns, support, or resistance. Always give your best estimate.\n"
-    "- Confidence should reflect your actual certainty: 50-65 = low, 66-80 = medium, 81-99 = high.\n\n"
+    "You are an elite binary options analyst with 15+ years experience on Quotex. "
+    "Analyze this 1-minute chart screenshot for the NEXT candle direction.\n\n"
+    "CRITICAL ANALYSIS METHOD:\n"
+    "1. READ the pair name from chart header/title area.\n"
+    "2. Focus on the LAST 3-5 candles — their body size, wick length, and color pattern.\n"
+    "3. Identify the IMMEDIATE micro-trend (last 5 candles direction, not overall trend).\n"
+    "4. Look for reversal signals: long wicks rejecting a level, engulfing patterns, doji at extremes.\n"
+    "5. Check if price is at a key support/resistance zone (where price bounced before).\n"
+    "6. If visible, check indicators: RSI overbought(>70)=PUT, oversold(<30)=CALL. MACD crossover direction. EMA crossovers.\n"
+    "7. Check for momentum exhaustion: shrinking candle bodies = trend weakening = possible reversal.\n\n"
+    "DECISION RULES FOR HIGH ACCURACY:\n"
+    "- Strong trend with big candles in same direction → follow the trend (CALL if bullish, PUT if bearish)\n"
+    "- Price hit support + bullish candle pattern → CALL\n"
+    "- Price hit resistance + bearish candle pattern → PUT\n"
+    "- Doji/hammer after a downtrend → CALL (reversal)\n"
+    "- Shooting star/inverted hammer after uptrend → PUT (reversal)\n"
+    "- 3+ consecutive same-color candles with shrinking bodies → expect reversal\n"
+    "- Long wick rejection candle → trade OPPOSITE direction of the wick\n"
+    "- If signals conflict, choose the direction supported by most evidence and lower your confidence.\n"
+    "- Be honest: if chart is unclear, set confidence to 50-60. Only use 80+ when multiple signals align.\n\n"
     "RESPOND in EXACTLY this format (one item per line, no extra text):\n"
     "DIRECTION: CALL or PUT\n"
     "CONFIDENCE: number between 50-99\n"
-    "PATTERNS: list of detected patterns (e.g., Bullish Engulfing, Hammer, Doji)\n"
-    "TREND: Bullish or Bearish or Sideways\n"
+    "PATTERNS: detected patterns (e.g., Bullish Engulfing, Pin Bar rejection)\n"
+    "TREND: Bullish or Bearish or Sideways (based on last 5-10 candles)\n"
     "SUPPORT: price level (e.g., 1.0845)\n"
     "RESISTANCE: price level (e.g., 1.0890)\n"
-    "INDICATORS: what indicators you see and their readings\n"
-    "REASON: detailed explanation of why you chose this direction based on the patterns and indicators\n"
-    "PAIR: currency pair name (e.g., EUR/USD, GBP/JPY) or best guess from price levels\n"
+    "INDICATORS: visible indicators and readings (e.g., RSI: 28 oversold)\n"
+    "REASON: concise explanation of WHY this direction, referencing specific patterns and price action\n"
+    "PAIR: pair name from chart (e.g., EUR/USD, BTCUSD-OTC)\n"
 )
 
 
