@@ -34,12 +34,12 @@ from flask import Flask, jsonify, request
 
 from tradowix_client import TradoWixClient
 
-# ─── Config ───
-EMAIL = os.environ.get("TRADOWIX_EMAIL", "")
-PASSWORD = os.environ.get("TRADOWIX_PASSWORD", "")
-DEFAULT_PAIR = os.environ.get("TRADOWIX_PAIR", "EURUSD-OTC")
-OWNER = os.environ.get("TRADOWIX_OWNER", "GHULAM MUJTABA")
-CONTACT = os.environ.get("TRADOWIX_CONTACT", "@BINARYSUPPORT")
+# ─── Config (apna email/password yahan dalo) ───
+EMAIL = "snida1606@gmail.com"
+PASSWORD = "Rohailcoolz@41"
+DEFAULT_PAIR = "EURUSD-OTC"
+OWNER = "GHULAM MUJTABA"
+CONTACT = "@BINARYSUPPORT"
 PORT = int(os.environ.get("PORT", 5000))
 MAX_CANDLES = 200
 
@@ -89,9 +89,31 @@ def get_payout_str(symbol: str) -> str:
 
 
 def get_rolling_candles(symbol: str) -> list:
-    """Get the latest MAX_CANDLES candles for a symbol, formatted."""
+    """Get the latest MAX_CANDLES candles for a symbol, formatted and gap-checked."""
     with candle_lock:
-        raw = client._candle_history.get(symbol.upper(), [])
+        raw = list(client._candle_history.get(symbol.upper(), []))
+
+        # Extra safety: fill any remaining gaps before serving
+        if len(raw) >= 2:
+            filled = [raw[0]]
+            for i in range(1, len(raw)):
+                prev = filled[-1]
+                curr = raw[i]
+                expected = prev["time"] + 60000
+                while expected < curr["time"]:
+                    filled.append({
+                        "time": expected,
+                        "open": prev["close"],
+                        "high": prev["close"],
+                        "low": prev["close"],
+                        "close": prev["close"],
+                        "volume": 0,
+                    })
+                    prev = filled[-1]
+                    expected += 60000
+                filled.append(curr)
+            raw = filled
+
         if len(raw) > MAX_CANDLES:
             raw = raw[-MAX_CANDLES:]
         return [format_candle(c) for c in raw]
@@ -229,11 +251,6 @@ def list_pairs():
 def start_client():
     """Initialize TradoWix client in background."""
     global client
-
-    if not EMAIL or not PASSWORD:
-        logger.error("Set TRADOWIX_EMAIL and TRADOWIX_PASSWORD environment variables!")
-        logger.info("Example: TRADOWIX_EMAIL=you@email.com TRADOWIX_PASSWORD=pass python tradowix_api.py")
-        return
 
     try:
         logger.info("Logging in as %s...", EMAIL)
