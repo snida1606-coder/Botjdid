@@ -4,3 +4,4 @@ requests
 pillow
 colorama
 flask
+websockets>=12.0
