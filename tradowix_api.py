@@ -397,14 +397,32 @@ def start_client():
         logger.info("Logging in as %s...", EMAIL)
         client.login(EMAIL, PASSWORD)
         logger.info("Logged in! Connecting WebSocket...")
-        client.connect()
-        logger.info("Connected! %d instruments available", len(client.instruments))
-
-        # Subscribe to ALL startup pairs (jaise EURUSD - ye perfect kaam karta hai)
-        logger.info("Subscribing to %d pairs: %s", len(STARTUP_PAIRS), STARTUP_PAIRS)
+        
+        # Subscribe to ALL pairs BEFORE connect (KEY FIX!)
+        # This way when WS authenticates, auto-resubscribe will work
+        logger.info("Subscribing to %d pairs BEFORE connect: %s", len(STARTUP_PAIRS), STARTUP_PAIRS)
         for pair in STARTUP_PAIRS:
-            ensure_subscribed(pair)
-            time.sleep(1)  # Small delay between subscriptions
+            pair = pair.upper()
+            if pair not in client._subscribed_symbols:
+                client._subscribed_symbols.add(pair)
+                client._candle_events[pair] = threading.Event()
+                # Don't send yet - just prepopulate _subscribed_symbols
+        
+        # Now connect - WS will auto-resubscribe to all pairs
+        client.connect()
+        
+        # Wait for all pairs to get data
+        logger.info("Waiting for candle data...")
+        for pair in STARTUP_PAIRS:
+            pair = pair.upper()
+            for _ in range(30):  # 30 seconds max per pair
+                if client._candle_history.get(pair):
+                    logger.info("Got data for %s", pair)
+                    break
+                time.sleep(1)
+            else:
+                logger.warning("No data for %s after 30s", pair)
+        
         logger.info("Ready! All %d pairs subscribed", len(STARTUP_PAIRS))
 
     except Exception as e:
