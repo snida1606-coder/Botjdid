@@ -125,6 +125,11 @@ def ensure_subscribed(symbol: str):
     """Make sure we're subscribed to a symbol's tick feed."""
     symbol = symbol.upper()
     if symbol not in client._subscribed_symbols:
+        # Clear old data
+        if symbol in client._candle_history:
+            del client._candle_history[symbol]
+        if symbol in client._candle_events:
+            del client._candle_events[symbol]
         client.subscribe(symbol, lookback_minutes=300, timeframe=60)
         # Wait for candle history to arrive
         event = client._candle_events.get(symbol)
@@ -146,9 +151,10 @@ def force_resubscribe(symbol: str) -> dict:
         client._subscribed_symbols.discard(symbol)
         logger.info("Removed old subscription: %s", symbol)
     
-    # Step 2: Clear old candle history (optional - can keep for reference)
-    # if symbol in client._candle_history:
-    #     del client._candle_history[symbol]
+    # Step 2: Clear old candle history - THIS IS CRITICAL
+    if symbol in client._candle_history:
+        del client._candle_history[symbol]
+        logger.info("Cleared old candle history: %s", symbol)
     
     # Step 3: Clear old event
     if symbol in client._candle_events:
