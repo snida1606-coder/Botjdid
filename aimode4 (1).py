@@ -122,6 +122,41 @@ def get_state(uid: int) -> UserState:
         user_states[uid] = UserState()
     return user_states[uid]
 
+# ══════════════ AUTO TRADE STATE (Per User) ══════════════
+class AutoTradeState:
+    def __init__(self, uid: int):
+        self.uid = uid
+        self.email = None
+        self.password = None
+        self.client = None
+        self.balance = 0.0
+        self.starting_balance = 0.0
+        self.tp_target = 0.0
+        self.sl_target = 0.0
+        self.mtg = 1
+        self.strategy = 1
+        self.strategy_name = "RSI basic"
+        self.running = False
+        self.trade_count = 0
+        self.win_count = 0
+        self.loss_count = 0
+        self.current_profit = 0.0
+        self.last_trade_result = None
+        self.pairs = [
+            "EURUSD-OTC", "EURAUD-OTC", "USDBRL-OTC", "USDARS-OTC",
+            "USDCOP-OTC", "USDNGN-OTC", "USDBDT-OTC", "USDTRY-OTC",
+            "USDPKR-OTC", "USDINR-OTC", "EURCAD-OTC", "EURGBP-OTC",
+            "NZDCAD-OTC", "USDMXN-OTC", "BNBUSD-OTC", "AVAXUSD-OTC",
+            "TRUMPUSD-OTC", "MSFT-OTC"
+        ]
+        self.api_url = "https://tradowix-api.onrender.com"
+
+auto_traders: Dict[int, AutoTradeState] = {}
+def get_auto_trader(uid: int) -> AutoTradeState:
+    if uid not in auto_traders:
+        auto_traders[uid] = AutoTradeState(uid)
+    return auto_traders[uid]
+
 # ══════════════ PREMIUM EMOJI IDs ══════════════
 PREMIUM_EMOJI_IDS = {
     "👑": 5217822164362739968, "📊": 6145248943807667330,
@@ -2853,6 +2888,16 @@ STATE_SMZ_HACK_PAIRS = 39
 STATE_AI_FILTER_SIGNALS = 40
 STATE_AI_FILTER_CONFIDENCE = 41
 
+# ══════════════ AUTO TRADE STATES ══════════════
+STATE_AUTO_LOGIN_EMAIL = 42
+STATE_AUTO_LOGIN_PASSWORD = 43
+STATE_AUTO_TP = 44
+STATE_AUTO_SL = 45
+STATE_AUTO_MTG = 46
+STATE_AUTO_STRATEGY = 47
+STATE_AUTO_CONFIRM = 48
+STATE_AUTO_RUNNING = 49
+
 # ══════════════ HELPER FUNCTIONS FOR BUTTONS & ENTITIES ══════════════
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
     if emoji_id:
@@ -2876,24 +2921,25 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔥 Welcome to SMZXV4.3 AI\n\n"
         f"Quick Guide\n"
         f"1. 🤖 AI Mode – auto best signal (6 strategies)\n"
-        f"2. 📊 Start Trading – live chart analysis\n"
-        f"3. 🐶 Signal Checker – verify past signals\n"
-        f"4. 🐶 Future Signals – next‑hour signals\n"
-        f"5. 🏆 Backtest – multi‑day win‑rate test\n"
-        f"6. 🐶 UTC Converter – timezone changer\n"
-        f"7. 🐶 Pair Payout% – live payout list\n"
-        f"8. 🐶 Market Trend – Current market direction\n"
-        f"9. 🐶 Candle Colors – last 6 candle colours\n"
-        f"10. 🐶Text Formatter – reformat signal lists\n"
-        f"11. 🐶 Font Changer – apply text styles\n"
-        f"12. 📺 Trend Filter – Ai trend filter\n"
-        f"13. 🤖 AI Filter – AI signal classifier\n"
-        f"14. 📸 AI Chart Analyzer – send chart screenshot\n"
-        f"15. 🤭 Help – contact support\n\n"
+        f"2. 📊 Auto Trade – auto trade with real money\n"
+        f"3. 📊 Start Trading – live chart analysis\n"
+        f"4. 🐶 Signal Checker – verify past signals\n"
+        f"5. 🐶 Future Signals – next‑hour signals\n"
+        f"6. 🏆 Backtest – multi‑day win‑rate test\n"
+        f"7. 🐶 UTC Converter – timezone changer\n"
+        f"8. 🐶 Pair Payout% – live payout list\n"
+        f"9. 🐶 Market Trend – Current market direction\n"
+        f"10. 🐶 Candle Colors – last 6 candle colours\n"
+        f"11. 🐶Text Formatter – reformat signal lists\n"
+        f"12. 🐶 Font Changer – apply text styles\n"
+        f"13. 📺 Trend Filter – Ai trend filter\n"
+        f"14. 🤖 AI Filter – AI signal classifier\n"
+        f"15. 📸 AI Chart Analyzer – send chart screenshot\n"
+        f"16. 🤭 Help – contact support\n\n"
         f"💎 Choose an option below to continue.\n\n"
         f"©OWNER @Rohailtrader ✨"
     )
-    bold_words = ["AI Mode", "Start Trading", "Signal Checker", "Future Signals", "Backtest",
+    bold_words = ["AI Mode", "Auto Trade", "Start Trading", "Signal Checker", "Future Signals", "Backtest",
                   "UTC Converter", "Pair Payout%", "Market Trend", "Candle Colors",
                   "Text Formatter", "Font Changer", "Trend Filter", "AI Filter", "AI Chart Analyzer", "Help", "SMZXV4.3"]
     extra_entities = []
@@ -2906,17 +2952,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [colored_button(" AI Mode", "menu_ai_mode", KeyboardButtonStyle.SUCCESS, "5314391089514291948")],
         [colored_button(" Start Trading", "menu_analysis", KeyboardButtonStyle.SUCCESS, "6145248943807667330"),
          colored_button(" Signal Checker", "menu_checker", KeyboardButtonStyle.PRIMARY, "6145553439809084250")],
-        [colored_button(" Future Signals", "menu_futuresignal", KeyboardButtonStyle.PRIMARY, "6062153953833917531"),
-         colored_button(" Backtest", "menu_backtest", KeyboardButtonStyle.SUCCESS, "6147840110462245787")],
-        [colored_button(" UTC Converter", "menu_utc_converter", KeyboardButtonStyle.PRIMARY, "5413879192267805083"),
-         colored_button(" Pair Payout%", "menu_pair_payout", KeyboardButtonStyle.PRIMARY, "6145449239607515472")],
-        [colored_button(" Market Trend", "menu_market_trend", KeyboardButtonStyle.PRIMARY, "6147654280112248427"),
-         colored_button(" Candle Colors", "menu_candle_colors", KeyboardButtonStyle.PRIMARY, "5217911744495624141")],
-        [colored_button(" Text Formatter", "menu_text_formatter", KeyboardButtonStyle.PRIMARY, "5282843764451195532"),
-         colored_button(" Font Changer", "menu_font_changer", KeyboardButtonStyle.PRIMARY, "6282685788450721937")],
-        [colored_button(" Trend Filter", "menu_trend_filter", KeyboardButtonStyle.PRIMARY, "5316681209026191987"),
-         colored_button(" AI Filter", "menu_ai_filter", KeyboardButtonStyle.SUCCESS, "6217370240800527004")],
-        [colored_button(" AI Chart Analyzer", "menu_chart_analyzer", KeyboardButtonStyle.SUCCESS, "5854710508065658472")],
+        [colored_button(" Auto Trade", "auto_trade_start", KeyboardButtonStyle.DANGER, "5316681209026191987"),
+         colored_button(" Future Signals", "menu_futuresignal", KeyboardButtonStyle.PRIMARY, "6062153953833917531")],
+        [colored_button(" Backtest", "menu_backtest", KeyboardButtonStyle.SUCCESS, "6147840110462245787"),
+         colored_button(" UTC Converter", "menu_utc_converter", KeyboardButtonStyle.PRIMARY, "5413879192267805083")],
+        [colored_button(" Pair Payout%", "menu_pair_payout", KeyboardButtonStyle.PRIMARY, "6145449239607515472"),
+         colored_button(" Market Trend", "menu_market_trend", KeyboardButtonStyle.PRIMARY, "6147654280112248427")],
+        [colored_button(" Candle Colors", "menu_candle_colors", KeyboardButtonStyle.PRIMARY, "5217911744495624141"),
+         colored_button(" Text Formatter", "menu_text_formatter", KeyboardButtonStyle.PRIMARY, "5282843764451195532")],
+        [colored_button(" Font Changer", "menu_font_changer", KeyboardButtonStyle.PRIMARY, "6282685788450721937"),
+         colored_button(" Trend Filter", "menu_trend_filter", KeyboardButtonStyle.PRIMARY, "5316681209026191987")],
+        [colored_button(" AI Filter", "menu_ai_filter", KeyboardButtonStyle.SUCCESS, "6217370240800527004"),
+         colored_button(" AI Chart Analyzer", "menu_chart_analyzer", KeyboardButtonStyle.SUCCESS, "5854710508065658472")],
         [colored_button(" Help", "menu_admin", KeyboardButtonStyle.DANGER, "6062294201696000196")],
     ]
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -3481,6 +3528,438 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st.ai_min_consensus = 2
     st.ai_required_strategies = []
     sender.send_message(uid, "🤖 Stopping. Returning to main menu. Use /start to see options.")
+    
+    # Also stop auto trade if running
+    at = get_auto_trader(uid)
+    at.running = False
+
+# ══════════════ AUTO TRADE HANDLERS ══════════════
+
+STRATEGY_NAMES_AUTO = {
+    1: "RSI basic", 2: "EMA filtered", 3: "WR divergence",
+    4: "ADX stochastic", 5: "Ultra accurate", 6: "IROF pro"
+}
+
+def get_candles_auto(pair: str) -> list:
+    """Get candles from Tradowix API"""
+    try:
+        resp = req.get(f"https://tradowix-api.onrender.com/candles/{pair}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("candles", [])
+    except:
+        pass
+    return []
+
+def calc_rsi(candles, period=14):
+    if len(candles) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(candles)):
+        change = candles[i]['close'] - candles[i-1]['close']
+        gains.append(change if change > 0 else 0)
+        losses.append(abs(change) if change < 0 else 0)
+    if not gains:
+        return 50.0
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    return 100 - (100 / (1 + (avg_gain / avg_loss)))
+
+def calc_ema(candles, period):
+    if len(candles) < period:
+        return candles[-1]['close']
+    mult = 2 / (period + 1)
+    ema = candles[0]['close']
+    for c in candles[1:]:
+        ema = (c['close'] * mult) + (ema * (1 - mult))
+    return ema
+
+def calc_boll(candles, period=20):
+    if len(candles) < period:
+        return 0, 0, 0
+    prices = [c['close'] for c in candles[-period:]]
+    sma = sum(prices) / period
+    std = (sum((p - sma) ** 2 for p in prices) / period) ** 0.5
+    return sma + (std * 2), sma, sma - (std * 2)
+
+def get_signal(candles, strategy_id):
+    if len(candles) < 20:
+        return {"signal": "HOLD", "confidence": 0, "reason": "Insufficient data"}
+    rsi = calc_rsi(candles)
+    price = candles[-1]['close']
+    
+    if strategy_id == 1:  # RSI
+        if rsi < 30:
+            return {"signal": "BUY", "confidence": min(100, 100 - rsi + 20), "reason": f"RSI Oversold ({rsi:.1f})"}
+        elif rsi > 70:
+            return {"signal": "SELL", "confidence": min(100, rsi - 20), "reason": f"RSI Overbought ({rsi:.1f})"}
+        return {"signal": "HOLD", "confidence": 50, "reason": f"RSI Neutral ({rsi:.1f})"}
+    
+    elif strategy_id == 2:  # EMA
+        ema9 = calc_ema(candles, 9)
+        ema21 = calc_ema(candles, 21)
+        if ema9 > ema21 and price > ema9 and rsi < 60:
+            return {"signal": "BUY", "confidence": 80, "reason": f"EMA Bullish"}
+        elif ema9 < ema21 and price < ema9 and rsi > 40:
+            return {"signal": "SELL", "confidence": 80, "reason": f"EMA Bearish"}
+        return {"signal": "HOLD", "confidence": 50, "reason": "EMA Neutral"}
+    
+    elif strategy_id == 3:  # WR
+        if rsi < 30:
+            return {"signal": "BUY", "confidence": 75, "reason": f"WR Oversold"}
+        elif rsi > 70:
+            return {"signal": "SELL", "confidence": 75, "reason": f"WR Overbought"}
+        return {"signal": "HOLD", "confidence": 50, "reason": "WR Neutral"}
+    
+    elif strategy_id == 4:  # ADX
+        if rsi < 35:
+            return {"signal": "BUY", "confidence": 75, "reason": f"ADX Oversold"}
+        elif rsi > 65:
+            return {"signal": "SELL", "confidence": 75, "reason": f"ADX Overbought"}
+        return {"signal": "HOLD", "confidence": 50, "reason": "ADX Neutral"}
+    
+    elif strategy_id == 5:  # Ultra
+        ema9 = calc_ema(candles, 9)
+        ema21 = calc_ema(candles, 21)
+        upper, _, lower = calc_boll(candles)
+        if rsi < 25 and ema9 > ema21 and price <= lower:
+            return {"signal": "BUY", "confidence": 90, "reason": "Ultra Signal BUY"}
+        elif rsi > 75 and ema9 < ema21 and price >= upper:
+            return {"signal": "SELL", "confidence": 90, "reason": "Ultra Signal SELL"}
+        return {"signal": "HOLD", "confidence": 50, "reason": "Ultra Neutral"}
+    
+    elif strategy_id == 6:  # IROF
+        upper, _, lower = calc_boll(candles)
+        if price <= lower and rsi < 35:
+            return {"signal": "BUY", "confidence": 85, "reason": f"IROF BUY"}
+        elif price >= upper and rsi > 65:
+            return {"signal": "SELL", "confidence": 85, "reason": f"IROF SELL"}
+        return {"signal": "HOLD", "confidence": 50, "reason": "IROF Neutral"}
+    
+    return {"signal": "HOLD", "confidence": 50, "reason": "Unknown"}
+
+async def auto_trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start Auto Trade - ask for email"""
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_authorized(uid):
+        await query.answer("⛔ Access denied. Contact Admin.", show_alert=True)
+        return
+    await query.answer()
+    
+    trader = get_auto_trader(uid)
+    if trader.running:
+        msg = "⚠️ Auto Trade is already running!\nUse /stop to stop first."
+        entities = build_custom_emoji_entities(msg)
+        await query.message.reply_text(msg, entities=entities)
+        return
+    
+    context.user_data['auto_state'] = STATE_AUTO_LOGIN_EMAIL
+    msg = "🚀 *Auto Trade Setup*\n\n📧 Please enter your TradoWix email:"
+    entities = build_custom_emoji_entities(msg)
+    await query.message.reply_text(msg, entities=entities, parse_mode="Markdown")
+
+async def auto_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store email"""
+    uid = update.effective_user.id
+    trader = get_auto_trader(uid)
+    trader.email = update.message.text.strip()
+    context.user_data['auto_state'] = STATE_AUTO_LOGIN_PASSWORD
+    msg = "🔐 *Enter your TradoWix password:*"
+    entities = build_custom_emoji_entities(msg)
+    await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
+
+async def auto_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store password and login"""
+    uid = update.effective_user.id
+    trader = get_auto_trader(uid)
+    trader.password = update.message.text.strip()
+    
+    msg = "⏳ *Logging in to TradoWix...*"
+    entities = build_custom_emoji_entities(msg)
+    loading_msg = await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
+    
+    try:
+        from tradowix_client import TradoWixClient
+        client = TradoWixClient()
+        client.login(trader.email, trader.password)
+        client.connect(blocking=True)
+        trader.client = client
+        bal = client.get_balance()
+        trader.balance = bal.get("currentBalance", 0) or bal.get("demoBalance", 0)
+        trader.starting_balance = trader.balance
+        
+        await loading_msg.edit_text(
+            f"✅ *Login Successful!*\n\n📊 *Balance:* `${trader.balance:.2f}`\n\n"
+            f"Enter TP (Take Profit) in $ (e.g., 7):"
+        )
+        context.user_data['auto_state'] = STATE_AUTO_TP
+        
+    except Exception as e:
+        await loading_msg.edit_text(f"❌ *Login Failed*\n\n{str(e)}\n\nUse /start to try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+async def auto_tp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store TP"""
+    uid = update.effective_user.id
+    trader = get_auto_trader(uid)
+    try:
+        tp = float(update.message.text.strip())
+        if tp <= 0:
+            raise ValueError()
+        trader.tp_target = tp
+    except:
+        await update.message.reply_text("❌ Invalid TP. Enter a positive number:")
+        return STATE_AUTO_TP
+    
+    context.user_data['auto_state'] = STATE_AUTO_SL
+    msg = f"✅ *TP Set: ${tp:.2f}*\n\nEnter SL (Stop Loss) in $ (e.g., 12):"
+    entities = build_custom_emoji_entities(msg)
+    await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
+
+async def auto_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store SL and ask MTG"""
+    uid = update.effective_user.id
+    trader = get_auto_trader(uid)
+    try:
+        sl = float(update.message.text.strip())
+        if sl <= 0:
+            raise ValueError()
+        trader.sl_target = sl
+    except:
+        await update.message.reply_text("❌ Invalid SL. Enter a positive number:")
+        return STATE_AUTO_SL
+    
+    context.user_data['auto_state'] = STATE_AUTO_MTG
+    msg = (
+        f"✅ *SL Set: ${sl:.2f}*\n\n"
+        f"📊 *Balance:* `${trader.balance:.2f}`\n"
+        f"🎯 *TP:* `${trader.tp_target:.2f}` | 🛡️ *SL:* `${sl:.2f}`\n\n"
+        f"*Select Martingale Step:*"
+    )
+    buttons = [
+        [InlineKeyboardButton("1️⃣ Step 1 (No Martingale)", callback_data="at_mtg_1")],
+        [InlineKeyboardButton("2️⃣ Step 2 (Martingale x2)", callback_data="at_mtg_2")],
+    ]
+    entities = build_custom_emoji_entities(msg)
+    await update.message.reply_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+async def auto_mtg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store MTG and ask strategy"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    trader.mtg = int(query.data.split("_")[-1])
+    
+    context.user_data['auto_state'] = STATE_AUTO_STRATEGY
+    msg = (
+        f"✅ *MTG: Step {trader.mtg}*\n\n"
+        f"*Select Trading Strategy (1-6):*"
+    )
+    buttons = [
+        [InlineKeyboardButton("1️⃣ RSI basic", callback_data="at_strat_1"),
+         InlineKeyboardButton("2️⃣ EMA filtered", callback_data="at_strat_2")],
+        [InlineKeyboardButton("3️⃣ WR divergence", callback_data="at_strat_3"),
+         InlineKeyboardButton("4️⃣ ADX stochastic", callback_data="at_strat_4")],
+        [InlineKeyboardButton("5️⃣ Ultra accurate", callback_data="at_strat_5"),
+         InlineKeyboardButton("6️⃣ IROF pro", callback_data="at_strat_6")],
+    ]
+    entities = build_custom_emoji_entities(msg)
+    await query.message.edit_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+async def auto_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store strategy and show confirmation"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    trader.strategy = int(query.data.split("_")[-1])
+    trader.strategy_name = STRATEGY_NAMES_AUTO.get(trader.strategy, "Unknown")
+    
+    msg = (
+        f"🎯 *Auto Trade Configuration*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📧 *Account:* `{trader.email}`\n"
+        f"💰 *Balance:* `${trader.balance:.2f}`\n"
+        f"🎯 *TP:* `${trader.tp_target:.2f}`\n"
+        f"🛡️ *SL:* `${trader.sl_target:.2f}`\n"
+        f"📈 *MTG:* Step {trader.mtg}\n"
+        f"🎮 *Strategy:* `{trader.strategy}. {trader.strategy_name}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"*Ready to start Auto Trade?*"
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ START AUTO TRADE", callback_data="at_start")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="at_cancel")],
+    ]
+    entities = build_custom_emoji_entities(msg)
+    await query.message.edit_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+async def auto_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start auto trading"""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    
+    trader.running = True
+    trader.trade_count = 0
+    trader.win_count = 0
+    trader.loss_count = 0
+    
+    msg = (
+        f"🚀 *Auto Trade Started!*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *Balance:* `${trader.balance:.2f}`\n"
+        f"🎯 *Target:* `${trader.tp_target:.2f}` profit\n"
+        f"🛡️ *Limit:* `${trader.sl_target:.2f}` loss\n"
+        f"🎮 *Strategy:* `{trader.strategy_name}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏳ Scanning pairs...\nUse /stop to stop."
+    )
+    entities = build_custom_emoji_entities(msg)
+    await query.message.edit_text(msg, entities=entities, parse_mode="Markdown")
+    
+    # Start trading loop
+    threading.Thread(target=auto_trade_loop, args=(trader, context), daemon=True).start()
+
+async def auto_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel auto trade"""
+    query = update.callback_query
+    await query.answer()
+    msg = "❌ *Auto Trade Cancelled.*\nUse /start to begin again."
+    entities = build_custom_emoji_entities(msg)
+    await query.message.edit_text(msg, entities=entities, parse_mode="Markdown")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+def auto_trade_loop(trader, context):
+    """Main auto trading loop"""
+    import time
+    import asyncio
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def send(msg, parse="Markdown"):
+        try:
+            await context.bot.send_message(chat_id=trader.uid, text=msg, parse_mode=parse)
+        except:
+            pass
+    
+    async def run():
+        await send("🔍 *Starting Auto Trade Scan...*")
+        last_trade = 0
+        base_amount = 1.0
+        
+        while trader.running:
+            try:
+                # Check TP/SL
+                if trader.client:
+                    bal = trader.client.get_balance()
+                    trader.balance = bal.get("currentBalance", 0) or bal.get("demoBalance", 0)
+                
+                profit = trader.balance - trader.starting_balance
+                
+                if profit >= trader.tp_target:
+                    trader.running = False
+                    await send(f"🏆 *TARGET REACHED!*\n\n💰 Started: `${trader.starting_balance:.2f}`\n💵 Now: `${trader.balance:.2f}`\n📈 Profit: `${profit:.2f}` ✅\n📊 Trades: {trader.trade_count} ({trader.win_count}W/{trader.loss_count}L)")
+                    break
+                
+                if profit <= -trader.sl_target:
+                    trader.running = False
+                    await send(f"🛑 *STOP LOSS HIT!*\n\n💰 Started: `${trader.starting_balance:.2f}`\n💵 Now: `${trader.balance:.2f}`\n📉 Loss: `${abs(profit):.2f}` ❌\n📊 Trades: {trader.trade_count}")
+                    break
+                
+                # Scan pairs
+                for pair in trader.pairs:
+                    if not trader.running:
+                        break
+                    
+                    try:
+                        candles = get_candles_auto(pair)
+                        if not candles or len(candles) < 20:
+                            continue
+                        
+                        signal = get_signal(candles, trader.strategy)
+                        
+                        if signal["signal"] != "HOLD" and signal["confidence"] >= 70:
+                            now = time.time()
+                            if now - last_trade < 30:
+                                continue
+                            
+                            direction = "call" if signal["signal"] == "BUY" else "put"
+                            amount = base_amount
+                            if trader.mtg == 2 and trader.last_trade_result == "loss":
+                                amount = base_amount * 2
+                            
+                            if trader.client:
+                                try:
+                                    tid = trader.client.place_trade(pair, direction, amount, 1, is_demo=False)
+                                    last_trade = now
+                                    trader.trade_count += 1
+                                    
+                                    await send(
+                                        f"⚡ *AUTO TRADE*\n━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"📊 Pair: `{pair}`\n"
+                                        f"{'📈' if direction=='call' else '📉'} Direction: {signal['signal']}\n"
+                                        f"💰 Amount: `${amount:.2f}`\n"
+                                        f"🎯 Confidence: `{signal['confidence']:.0f}%`\n"
+                                        f"🎮 Strategy: `{trader.strategy_name}`\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━\n🔄 Placed! Waiting result..."
+                                    )
+                                    
+                                    await asyncio.sleep(65)
+                                    
+                                    new_bal = trader.client.get_balance().get("currentBalance", 0) or trader.client.get_balance().get("demoBalance", 0)
+                                    change = new_bal - trader.balance
+                                    trader.balance = new_bal
+                                    
+                                    if change > 0:
+                                        trader.win_count += 1
+                                        trader.last_trade_result = "win"
+                                        await send(f"✅ *WIN*\n💵 Balance: `${trader.balance:.2f}` | Change: `${change:+.2f}`\n📊 W/L: {trader.win_count}/{trader.loss_count}")
+                                    else:
+                                        trader.loss_count += 1
+                                        trader.last_trade_result = "loss"
+                                        await send(f"❌ *LOSS*\n💵 Balance: `${trader.balance:.2f}` | Change: `${change:+.2f}`\n📊 W/L: {trader.win_count}/{trader.loss_count}")
+                                        
+                                except Exception as e:
+                                    await send(f"⚠️ Trade Error: {str(e)}")
+                                    continue
+                        
+                        await asyncio.sleep(2)
+                    except:
+                        continue
+                
+                await asyncio.sleep(10)
+                
+            except:
+                await asyncio.sleep(10)
+        
+        await send(f"🛑 *Auto Trade Stopped*\n💰 {trader.starting_balance:.2f} → {trader.balance:.2f}\n📊 {trader.trade_count} trades")
+    
+    loop.run_until_complete(run())
+
+auto_trade_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(auto_trade_start, pattern="^auto_trade_start$")],
+    states={
+        STATE_AUTO_LOGIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_email)],
+        STATE_AUTO_LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_password)],
+        STATE_AUTO_TP: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_tp)],
+        STATE_AUTO_SL: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_sl)],
+        STATE_AUTO_MTG: [CallbackQueryHandler(auto_mtg, pattern=r"^at_mtg_\d+$")],
+        STATE_AUTO_STRATEGY: [CallbackQueryHandler(auto_strategy, pattern=r"^at_strat_\d+$")],
+        STATE_AUTO_CONFIRM: [
+            CallbackQueryHandler(auto_start, pattern="^at_start$"),
+            CallbackQueryHandler(auto_cancel, pattern="^at_cancel$"),
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+)
 
 # ══════════════ GLOBAL TEXT HANDLER (all states) ══════════════
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4473,6 +4952,10 @@ def main():
     app.add_handler(CallbackQueryHandler(font_style_callback, pattern="^font_"))
     app.add_handler(CommandHandler("continue", continue_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
+
+    # Auto Trade Handler
+    app.add_handler(auto_trade_conv)
+    app.add_handler(CallbackQueryHandler(auto_trade_start, pattern="^auto_trade_start$"))
 
     print(f"{Fore.GREEN}[✓] Bot polling...{Style.RESET_ALL}")
     app.run_polling()
