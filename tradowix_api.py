@@ -40,6 +40,15 @@ from tradowix_client import TradoWixClient
 EMAIL = "snida1606@gmail.com"
 PASSWORD = "Rohailcoolz@41"
 DEFAULT_PAIR = "EURUSD-OTC"
+# IMPORTANT: Ye sab pairs startup pe subscribe honge (jaise EURUSD)
+STARTUP_PAIRS = [
+    "EURUSD-OTC",
+    "USDEGP-OTC",
+    "USDBRL-OTC",
+    "USDDZD-OTC",
+    "GBPUSD-OTC",
+    "USDJPY-OTC",
+]
 OWNER = "GHULAM MUJTABA"
 CONTACT = "@BINARYSUPPORT"
 PORT = int(os.environ.get("PORT", 5000))
@@ -374,9 +383,12 @@ def start_client():
         client.connect()
         logger.info("Connected! %d instruments available", len(client.instruments))
 
-        # Subscribe to default pair
-        ensure_subscribed(active_pair)
-        logger.info("Ready! Serving candles for %s", active_pair)
+        # Subscribe to ALL startup pairs (jaise EURUSD - ye perfect kaam karta hai)
+        logger.info("Subscribing to %d pairs: %s", len(STARTUP_PAIRS), STARTUP_PAIRS)
+        for pair in STARTUP_PAIRS:
+            ensure_subscribed(pair)
+            time.sleep(1)  # Small delay between subscriptions
+        logger.info("Ready! All %d pairs subscribed", len(STARTUP_PAIRS))
 
     except Exception as e:
         logger.error("Startup error: %s", e)
