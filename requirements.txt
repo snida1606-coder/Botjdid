@@ -1,3 +1,20 @@
-flask>=2.0
-requests>=2.28
+# TradoWix Telegram Bot - Requirements for Termux
+
+# Core dependencies
+requests>=2.28.0
+colorama>=0.4.6
+
+# Telegram Bot API
+python-telegram-bot==20.7
+
+# Telethon (Telegram Client)
+telethon>=1.28.0
+
+# Image Processing (for chart generation)
+Pillow>=9.5.0
+
+# WebSocket support
 websockets>=12.0
+
+# Flask (optional - for API server)
+flask>=2.3.0
