@@ -36,29 +36,8 @@ from telegram.ext import (
     ConversationHandler, MessageHandler, filters, ContextTypes
 )
 
-# =============================================
-#              24/7 UPTIME LAYER               
-# =============================================
-def run_uptime_server():
-    try:
-        import os
-        from flask import Flask
-        app = Flask(__name__)
-        @app.route('/')
-        def home(): return "SMZX AI MODE BOT IS LIVE 24/7", 200
-        
-        # Render dynamic port use karta hai, isliye os.environ zaroori hai
-        port = int(os.environ.get("PORT", 8080))
-        app.run(host='0.0.0.0', port=port)
-    except Exception as e:
-        print(f"Flask Server Error: {e}")
-
-threading.Thread(target=run_uptime_server, daemon=True).start()
-# =============================================
-
-
 # ══════════════ CONFIG ══════════════
-BOT_TOKEN = "7623409497:AAECia8u02Vwj4QOdBweRDwMlihn3n3RW38"
+BOT_TOKEN = "8668947816:AAEFq6cvyffV9ig6vr6nCaRUn0XheWH913M"
 SUPABASE_URL = "https://jklibjyjzimcjlpvskvw.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprbGlianlqemltY2pscHZza3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTE0NzEsImV4cCI6MjA4OTY4NzQ3MX0.aPMtnplXCpMenfdpDAPFcdMd4ccptM2L3C5oCWWC4X4"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
