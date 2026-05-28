@@ -361,10 +361,13 @@ class TradoWixClient:
 
     def _send_ws_message(self, msg: dict):
         if self._ws_loop and self._ws and self._connected:
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(msg)),
-                self._ws_loop,
-            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._ws.send(json.dumps(msg)),
+                    self._ws_loop,
+                ).result(timeout=5)  # Wait for message to be sent
+            except Exception as e:
+                logger.error("WS send error: %s", e)
 
     @staticmethod
     def _safe_call(cb, *args):

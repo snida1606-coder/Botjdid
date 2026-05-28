@@ -133,18 +133,35 @@ def get_rolling_candles(symbol: str) -> list:
 def ensure_subscribed(symbol: str):
     """Make sure we're subscribed to a symbol's tick feed."""
     symbol = symbol.upper()
-    if symbol not in client._subscribed_symbols:
-        # Clear old data
-        if symbol in client._candle_history:
-            del client._candle_history[symbol]
-        if symbol in client._candle_events:
-            del client._candle_events[symbol]
-        client.subscribe(symbol, lookback_minutes=300, timeframe=60)
-        # Wait for candle history to arrive
+    if symbol in client._subscribed_symbols and client._candle_history.get(symbol):
+        return  # Already subscribed with data
+    
+    logger.info("Subscribing to %s", symbol)
+    
+    # Clear old data
+    if symbol in client._candle_history:
+        del client._candle_history[symbol]
+    if symbol in client._candle_events:
+        del client._candle_events[symbol]
+    if symbol in client._subscribed_symbols:
+        client._subscribed_symbols.discard(symbol)
+    
+    # Subscribe
+    client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+    
+    # Wait for data with retries
+    for i in range(5):
         event = client._candle_events.get(symbol)
         if event:
-            event.wait(timeout=10)
-        logger.info("Subscribed to %s", symbol)
+            event.wait(timeout=3)
+        if client._candle_history.get(symbol):
+            logger.info("Got data for %s", symbol)
+            return
+        logger.warning("Retry %d for %s", i+1, symbol)
+        client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+        time.sleep(1)
+    
+    logger.error("Failed to get data for %s", symbol)
 
 
 def force_resubscribe(symbol: str) -> dict:
