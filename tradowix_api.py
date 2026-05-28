@@ -293,9 +293,18 @@ def candles_active():
 
 @app.route("/candles/<symbol>", methods=["GET"])
 def candles_by_symbol(symbol):
-    """Get rolling 200 candles for any pair."""
+    """Get rolling 200 candles for any pair. Auto-refreshes if stale."""
     symbol = client._normalize_symbol(symbol.strip().upper())
     ensure_subscribed(symbol)
+
+    # Check if candles are stale (older than 3 minutes) and refresh
+    candles_data = client._candle_history.get(symbol, [])
+    if candles_data:
+        last_time = candles_data[-1].get("time", 0)
+        current_time = int(time.time())
+        if current_time - last_time > 180:  # 3 minutes
+            logger.info("Candles for %s are stale, refreshing...", symbol)
+            force_resubscribe(symbol)
 
     # Wait briefly if candles not yet available
     for _ in range(20):
