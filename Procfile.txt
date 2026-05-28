@@ -1,1 +1,0 @@
-web: python aimode3.py
