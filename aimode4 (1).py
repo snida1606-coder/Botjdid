@@ -3655,7 +3655,7 @@ async def auto_trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(msg, entities=entities)
         return
     
-    context.user_data['auto_state'] = STATE_AUTO_LOGIN_EMAIL
+    context.user_data['state'] = STATE_AUTO_LOGIN_EMAIL
     msg = "🚀 *Auto Trade Setup*\n\n📧 Please enter your TradoWix email:"
     entities = build_custom_emoji_entities(msg)
     await query.message.reply_text(msg, entities=entities, parse_mode="Markdown")
@@ -3665,7 +3665,7 @@ async def auto_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     trader = get_auto_trader(uid)
     trader.email = update.message.text.strip()
-    context.user_data['auto_state'] = STATE_AUTO_LOGIN_PASSWORD
+    context.user_data['state'] = STATE_AUTO_LOGIN_PASSWORD
     msg = "🔐 *Enter your TradoWix password:*"
     entities = build_custom_emoji_entities(msg)
     await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
@@ -3694,7 +3694,7 @@ async def auto_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ *Login Successful!*\n\n📊 *Balance:* `${trader.balance:.2f}`\n\n"
             f"Enter TP (Take Profit) in $ (e.g., 7):"
         )
-        context.user_data['auto_state'] = STATE_AUTO_TP
+        context.user_data['state'] = STATE_AUTO_TP
         
     except Exception as e:
         await loading_msg.edit_text(f"❌ *Login Failed*\n\n{str(e)}\n\nUse /start to try again.")
@@ -3714,7 +3714,7 @@ async def auto_tp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid TP. Enter a positive number:")
         return STATE_AUTO_TP
     
-    context.user_data['auto_state'] = STATE_AUTO_SL
+    context.user_data['state'] = STATE_AUTO_SL
     msg = f"✅ *TP Set: ${tp:.2f}*\n\nEnter SL (Stop Loss) in $ (e.g., 12):"
     entities = build_custom_emoji_entities(msg)
     await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
@@ -3732,7 +3732,7 @@ async def auto_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid SL. Enter a positive number:")
         return STATE_AUTO_SL
     
-    context.user_data['auto_state'] = STATE_AUTO_MTG
+    context.user_data['state'] = STATE_AUTO_MTG
     msg = (
         f"✅ *SL Set: ${sl:.2f}*\n\n"
         f"📊 *Balance:* `${trader.balance:.2f}`\n"
@@ -3754,7 +3754,7 @@ async def auto_mtg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trader = get_auto_trader(uid)
     trader.mtg = int(query.data.split("_")[-1])
     
-    context.user_data['auto_state'] = STATE_AUTO_STRATEGY
+    context.user_data['state'] = STATE_AUTO_STRATEGY
     msg = (
         f"✅ *MTG: Step {trader.mtg}*\n\n"
         f"*Select Trading Strategy (1-6):*"
