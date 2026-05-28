@@ -1,28 +1,17 @@
 """
 TradoWix Live Candle Data — Flask API Server
 =============================================
-Serves rolling 200 candles (1m) for any TradoWix pair.
-Auto-updates every minute: new candle added, oldest removed.
+Uses SEPARATE WebSocket connection per pair for maximum reliability.
 
 Usage:
     python tradowix_api.py
 
 Endpoints:
     GET  /                       → Health check
-    POST /set-pair               → Set active pair (auto-refreshes) {"symbol": "EURUSD-OTC"}
-    POST /refresh/<SYMBOL>       → Force refresh a symbol subscription
-    POST /refresh                → Force refresh active pair
+    POST /set-pair               → Set active pair {"symbol": "EURUSD-OTC"}
     GET  /candles                → Get rolling 200 candles for active pair
     GET  /candles/<SYMBOL>       → Get rolling 200 candles for any pair
     GET  /pairs                  → List all available pairs
-
-Environment Variables:
-    TRADOWIX_EMAIL      → Login email
-    TRADOWIX_PASSWORD   → Login password
-    TRADOWIX_PAIR       → Default pair (default: EURUSD-OTC)
-    TRADOWIX_OWNER      → Owner name (default: GHULAM MUJTABA)
-    TRADOWIX_CONTACT    → Contact handle (default: @BINARYSUPPORT)
-    PORT                → Server port (default: 5000)
 """
 
 import json
@@ -36,31 +25,27 @@ from flask import Flask, jsonify, request
 
 from tradowix_client import TradoWixClient
 
-# ─── Config (apna email/password yahan dalo) ───
+# ─── Config ───
 EMAIL = "snida1606@gmail.com"
 PASSWORD = "Rohailcoolz@41"
 DEFAULT_PAIR = "EURUSD-OTC"
-# IMPORTANT: Ye sab pairs startup pe subscribe honge (jaise EURUSD)
-STARTUP_PAIRS = [
+# Pairs to monitor with dedicated connections
+MONITORED_PAIRS = [
     "EURUSD-OTC",
     "USDEGP-OTC",
     "USDBRL-OTC",
-    "USDDZD-OTC",
-    "GBPUSD-OTC",
-    "USDJPY-OTC",
 ]
-OWNER = "GHULAM MUJTABA"
-CONTACT = "@BINARYSUPPORT"
 PORT = int(os.environ.get("PORT", 5000))
 MAX_CANDLES = 200
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("tradowix_api")
 
-# ─── TradoWix Client ───
-client = TradoWixClient()
+# ─── One client PER pair (dedicated connection) ───
+pair_clients: dict = {}  # symbol -> TradoWixClient
+candle_locks: dict = {}  # symbol -> threading.Lock
 active_pair = DEFAULT_PAIR
-candle_lock = threading.Lock()
+master_client = None  # For getting instruments list
 
 # UTC+5 timezone
 UTC_PLUS_5 = timezone(timedelta(hours=5))
@@ -90,127 +75,78 @@ def format_candle(candle: dict) -> dict:
     }
 
 
-def get_payout_str(symbol: str) -> str:
-    """Get payout percentage string for a symbol."""
-    inst = client.find_instrument(symbol)
-    if inst:
-        rate = inst.get("effectiveTurboPayoutRate", inst.get("turboPayoutRate", 0))
-        return f"{int(rate * 100)}%"
-    return "!"
+def get_client(symbol: str) -> TradoWixClient:
+    """Get or create a dedicated client for a symbol."""
+    symbol = symbol.upper()
+    if symbol not in pair_clients:
+        logger.info("Creating new dedicated client for %s", symbol)
+        client = TradoWixClient()
+        pair_clients[symbol] = client
+        candle_locks[symbol] = threading.Lock()
+        
+        # Start client in background
+        def start_client():
+            try:
+                client.login(EMAIL, PASSWORD)
+                client.connect()
+                client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+                logger.info("Dedicated client for %s started", symbol)
+            except Exception as e:
+                logger.error("Client %s error: %s", symbol, e)
+        
+        threading.Thread(target=start_client, daemon=True).start()
+    
+    return pair_clients[symbol]
 
 
 def get_rolling_candles(symbol: str) -> list:
-    """Get the latest MAX_CANDLES candles for a symbol, formatted and gap-checked."""
-    with candle_lock:
-        raw = list(client._candle_history.get(symbol.upper(), []))
-
-        # Extra safety: fill any remaining gaps before serving
-        if len(raw) >= 2:
-            filled = [raw[0]]
-            for i in range(1, len(raw)):
-                prev = filled[-1]
-                curr = raw[i]
-                expected = prev["time"] + 60000
-                while expected < curr["time"]:
-                    filled.append({
-                        "time": expected,
-                        "open": prev["close"],
-                        "high": prev["close"],
-                        "low": prev["close"],
-                        "close": prev["close"],
-                        "volume": 0,
-                    })
-                    prev = filled[-1]
-                    expected += 60000
-                filled.append(curr)
-            raw = filled
-
-        if len(raw) > MAX_CANDLES:
-            raw = raw[-MAX_CANDLES:]
-        return [format_candle(c) for c in raw]
-
-
-def ensure_subscribed(symbol: str):
-    """Make sure we're subscribed to a symbol's tick feed."""
+    """Get the latest MAX_CANDLES candles for a symbol."""
     symbol = symbol.upper()
-    if symbol in client._subscribed_symbols and client._candle_history.get(symbol):
-        return  # Already subscribed with data
+    client = get_client(symbol)
     
-    logger.info("Subscribing to %s", symbol)
-    
-    # Clear old data
-    if symbol in client._candle_history:
-        del client._candle_history[symbol]
-    if symbol in client._candle_events:
-        del client._candle_events[symbol]
-    if symbol in client._subscribed_symbols:
-        client._subscribed_symbols.discard(symbol)
-    
-    # Subscribe
-    client.subscribe(symbol, lookback_minutes=300, timeframe=60)
-    
-    # Wait for data with retries
-    for i in range(5):
-        event = client._candle_events.get(symbol)
-        if event:
-            event.wait(timeout=3)
+    # Wait for data
+    for _ in range(30):
         if client._candle_history.get(symbol):
-            logger.info("Got data for %s", symbol)
-            return
-        logger.warning("Retry %d for %s", i+1, symbol)
-        client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+            break
         time.sleep(1)
     
-    logger.error("Failed to get data for %s", symbol)
+    candles_data = client._candle_history.get(symbol, [])
+    
+    # Fill gaps
+    if len(candles_data) >= 2:
+        filled = [candles_data[0]]
+        for i in range(1, len(candles_data)):
+            prev = filled[-1]
+            curr = candles_data[i]
+            expected = prev["time"] + 60000
+            while expected < curr["time"]:
+                filled.append({
+                    "time": expected,
+                    "open": prev["close"],
+                    "high": prev["close"],
+                    "low": prev["close"],
+                    "close": prev["close"],
+                    "volume": 0,
+                })
+                prev = filled[-1]
+                expected += 60000
+            filled.append(curr)
+        candles_data = filled
+
+    if len(candles_data) > MAX_CANDLES:
+        candles_data = candles_data[-MAX_CANDLES:]
+    
+    return [format_candle(c) for c in candles_data]
 
 
-def force_resubscribe(symbol: str) -> dict:
-    """
-    Force re-subscribe to a symbol by removing old subscription
-    and creating a fresh one. Fixes stale data issues.
-    """
-    symbol = symbol.upper()
-    logger.info("Force resubscribing to %s", symbol)
-    
-    # Step 1: Clear old subscription
-    if symbol in client._subscribed_symbols:
-        client._subscribed_symbols.discard(symbol)
-        logger.info("Removed old subscription: %s", symbol)
-    
-    # Step 2: Clear old candle history - THIS IS CRITICAL
-    if symbol in client._candle_history:
-        del client._candle_history[symbol]
-        logger.info("Cleared old candle history: %s", symbol)
-    
-    # Step 3: Clear old event
-    if symbol in client._candle_events:
-        del client._candle_events[symbol]
-    
-    # Step 4: Create fresh event
-    client._candle_events[symbol] = threading.Event()
-    
-    # Step 5: Fresh subscribe
-    client.subscribe(symbol, lookback_minutes=300, timeframe=60)
-    logger.info("Sent subscribe for %s", symbol)
-    
-    # Step 6: Wait for fresh data with retry
-    for i in range(3):
-        event = client._candle_events.get(symbol)
-        if event:
-            event.wait(timeout=10)
-        # Check if data arrived
-        if client._candle_history.get(symbol):
-            candles = client._candle_history[symbol]
-            if candles:
-                logger.info("Got %d candles for %s", len(candles), symbol)
-                break
-        logger.info("Retry %d for %s", i+1, symbol)
-        # If no data, subscribe again
-        client.subscribe(symbol, lookback_minutes=300, timeframe=60)
-        time.sleep(2)
-    
-    logger.info("Force resubscribed to %s", symbol)
-    return {"success": True, "symbol": symbol}
+def get_instruments():
+    """Get instruments from any available client."""
+    if master_client:
+        return master_client.instruments
+    for client in pair_clients.values():
+        if client.instruments:
+            return client.instruments
+    return []
 
 
 # ─── Flask App ───
@@ -219,18 +155,22 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
+    connected = []
+    for sym, client in pair_clients.items():
+        if client.is_connected:
+            connected.append(sym)
     return jsonify({
         "status": "running",
-        "connected": client.is_connected,
         "active_pair": active_pair,
-        "instruments": len(client.instruments),
-        "subscribed": list(client._subscribed_symbols),
+        "connections": len(connected),
+        "pairs": list(pair_clients.keys()),
+        "connected_pairs": connected,
     })
 
 
 @app.route("/set-pair", methods=["POST"])
 def set_pair():
-    """Set the active trading pair. Uses force resubscribe to fix stale data."""
+    """Set the active trading pair."""
     global active_pair
     data = request.get_json(force=True, silent=True) or {}
     symbol = data.get("symbol", "").strip().upper()
@@ -238,10 +178,13 @@ def set_pair():
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
 
-    symbol = client._normalize_symbol(symbol)
-
     # Verify instrument exists
-    inst = client.find_instrument(symbol)
+    inst = None
+    for i in get_instruments():
+        if i.get("symbol", "").upper() == symbol:
+            inst = i
+            break
+    
     if not inst:
         return jsonify({
             "error": f"Unknown symbol: {symbol}",
@@ -249,79 +192,36 @@ def set_pair():
         }), 404
 
     active_pair = symbol
+    # Ensure client exists
+    get_client(symbol)
     
-    # Force resubscribe (fixes stale data issue)
-    force_resubscribe(symbol)
+    # Wait for data
+    time.sleep(5)
 
     return jsonify({
         "success": True,
         "symbol": symbol,
         "displayName": inst.get("displayName", symbol),
-        "payout": get_payout_str(symbol),
+        "payout": f"{int(inst.get('effectiveTurboPayoutRate', 0) * 100)}%",
         "isOTC": inst.get("isOTC", False),
         "isOpen": inst.get("isOpen", False),
-        "message": "Pair set with fresh subscription"
-    })
-
-
-@app.route("/refresh/<symbol>", methods=["POST"])
-def refresh_symbol(symbol):
-    """
-    Force refresh a specific symbol's subscription.
-    Use this when candles are stale/not updating.
-    
-    Usage: POST /refresh/USDEGP-OTC
-    """
-    symbol = client._normalize_symbol(symbol.strip().upper())
-    
-    # Verify instrument exists
-    inst = client.find_instrument(symbol)
-    if not inst:
-        return jsonify({
-            "error": f"Unknown symbol: {symbol}",
-            "hint": "Use /pairs to see available symbols",
-        }), 404
-    
-    # Force resubscribe
-    result = force_resubscribe(symbol)
-    
-    return jsonify({
-        "success": True,
-        "symbol": symbol,
-        "displayName": inst.get("displayName", symbol),
-        "payout": get_payout_str(symbol),
-        "message": "Symbol refreshed successfully"
-    })
-
-
-@app.route("/refresh", methods=["POST"])
-def refresh_active():
-    """
-    Force refresh the active pair's subscription.
-    
-    Usage: POST /refresh
-    """
-    result = force_resubscribe(active_pair)
-    
-    return jsonify({
-        "success": True,
-        "symbol": active_pair,
-        "payout": get_payout_str(active_pair),
-        "message": f"Active pair {active_pair} refreshed successfully"
+        "message": "Pair set with dedicated connection"
     })
 
 
 @app.route("/candles", methods=["GET"])
 def candles_active():
     """Get rolling 200 candles for the active pair."""
-    ensure_subscribed(active_pair)
     candles = get_rolling_candles(active_pair)
-    payout = get_payout_str(active_pair)
+    inst = None
+    for i in get_instruments():
+        if i.get("symbol", "").upper() == active_pair:
+            inst = i
+            break
+    payout = f"{int(inst.get('effectiveTurboPayoutRate', 0) * 100)}%" if inst else "?"
 
     return jsonify({
         "symbol": active_pair,
-        "OWNER": OWNER,
-        "CONTACT": CONTACT,
         "payout": payout,
         "interval": "1m",
         "total_candles": len(candles),
@@ -331,32 +231,19 @@ def candles_active():
 
 @app.route("/candles/<symbol>", methods=["GET"])
 def candles_by_symbol(symbol):
-    """Get rolling 200 candles for any pair. Auto-refreshes if stale."""
-    symbol = client._normalize_symbol(symbol.strip().upper())
-    ensure_subscribed(symbol)
-
-    # Check if candles are stale (older than 3 minutes) and refresh
-    candles_data = client._candle_history.get(symbol, [])
-    if candles_data:
-        last_time = candles_data[-1].get("time", 0)
-        current_time = int(time.time())
-        if current_time - last_time > 180:  # 3 minutes
-            logger.info("Candles for %s are stale, refreshing...", symbol)
-            force_resubscribe(symbol)
-
-    # Wait briefly if candles not yet available
-    for _ in range(20):
-        if client._candle_history.get(symbol):
-            break
-        time.sleep(0.5)
-
+    """Get rolling 200 candles for any pair."""
+    symbol = symbol.strip().upper()
     candles = get_rolling_candles(symbol)
-    payout = get_payout_str(symbol)
+    
+    inst = None
+    for i in get_instruments():
+        if i.get("symbol", "").upper() == symbol:
+            inst = i
+            break
+    payout = f"{int(inst.get('effectiveTurboPayoutRate', 0) * 100)}%" if inst else "?"
 
     return jsonify({
         "symbol": symbol,
-        "OWNER": OWNER,
-        "CONTACT": CONTACT,
         "payout": payout,
         "interval": "1m",
         "total_candles": len(candles),
@@ -367,74 +254,44 @@ def candles_by_symbol(symbol):
 @app.route("/pairs", methods=["GET"])
 def list_pairs():
     """List all available trading pairs."""
-    category = request.args.get("category", "").lower()
-    otc_only = request.args.get("otc", "").lower() in ("true", "1", "yes")
-
     pairs = []
-    for inst in client.instruments:
-        if category and inst.get("category", "").lower() != category:
-            continue
-        if otc_only and not inst.get("isOTC", False):
-            continue
+    for inst in get_instruments():
         pairs.append({
-            "symbol": inst["symbol"],
-            "displayName": inst.get("displayName", inst["symbol"]),
-            "category": inst.get("category", ""),
+            "symbol": inst.get("symbol", ""),
+            "displayName": inst.get("displayName", inst.get("symbol", "")),
             "isOTC": inst.get("isOTC", False),
             "isOpen": inst.get("isOpen", False),
             "payout": f"{int(inst.get('effectiveTurboPayoutRate', 0) * 100)}%",
         })
-
     return jsonify({"total": len(pairs), "pairs": pairs})
 
 
 # ─── Startup ───
-def start_client():
-    """Initialize TradoWix client in background."""
-    global client
-
+def start_master_client():
+    """Start master client to get instruments list."""
+    global master_client
     try:
-        logger.info("Logging in as %s...", EMAIL)
-        client.login(EMAIL, PASSWORD)
-        logger.info("Logged in! Connecting WebSocket...")
-        
-        # Subscribe to ALL pairs BEFORE connect (KEY FIX!)
-        # This way when WS authenticates, auto-resubscribe will work
-        logger.info("Subscribing to %d pairs BEFORE connect: %s", len(STARTUP_PAIRS), STARTUP_PAIRS)
-        for pair in STARTUP_PAIRS:
-            pair = pair.upper()
-            if pair not in client._subscribed_symbols:
-                client._subscribed_symbols.add(pair)
-                client._candle_events[pair] = threading.Event()
-                # Don't send yet - just prepopulate _subscribed_symbols
-        
-        # Now connect - WS will auto-resubscribe to all pairs
-        client.connect()
-        
-        # Wait for all pairs to get data
-        logger.info("Waiting for candle data...")
-        for pair in STARTUP_PAIRS:
-            pair = pair.upper()
-            for _ in range(30):  # 30 seconds max per pair
-                if client._candle_history.get(pair):
-                    logger.info("Got data for %s", pair)
-                    break
-                time.sleep(1)
-            else:
-                logger.warning("No data for %s after 30s", pair)
-        
-        logger.info("Ready! All %d pairs subscribed", len(STARTUP_PAIRS))
-
+        master_client = TradoWixClient()
+        master_client.login(EMAIL, PASSWORD)
+        master_client.connect()
+        logger.info("Master client connected with %d instruments", len(master_client.instruments))
     except Exception as e:
-        logger.error("Startup error: %s", e)
+        logger.error("Master client error: %s", e)
 
 
 if __name__ == "__main__":
-    # Start client in background thread
-    threading.Thread(target=start_client, daemon=True).start()
-
-    # Give client a moment to connect
+    # Start master client for instruments
+    threading.Thread(target=start_master_client, daemon=True).start()
     time.sleep(3)
 
+    # Pre-start monitored pairs
+    logger.info("Pre-starting %d monitored pairs...", len(MONITORED_PAIRS))
+    for pair in MONITORED_PAIRS:
+        get_client(pair)
+        time.sleep(1)
+    
+    # Give clients time to connect
+    time.sleep(5)
+    
     logger.info("Starting Flask server on port %d...", PORT)
     app.run(host="0.0.0.0", port=PORT, debug=False)
