@@ -9,7 +9,9 @@ Usage:
 
 Endpoints:
     GET  /                       → Health check
-    POST /set-pair               → Set active pair  {"symbol": "EURUSD-OTC"}
+    POST /set-pair               → Set active pair (auto-refreshes) {"symbol": "EURUSD-OTC"}
+    POST /refresh/<SYMBOL>       → Force refresh a symbol subscription
+    POST /refresh                → Force refresh active pair
     GET  /candles                → Get rolling 200 candles for active pair
     GET  /candles/<SYMBOL>       → Get rolling 200 candles for any pair
     GET  /pairs                  → List all available pairs
@@ -131,6 +133,42 @@ def ensure_subscribed(symbol: str):
         logger.info("Subscribed to %s", symbol)
 
 
+def force_resubscribe(symbol: str) -> dict:
+    """
+    Force re-subscribe to a symbol by removing old subscription
+    and creating a fresh one. Fixes stale data issues.
+    """
+    symbol = symbol.upper()
+    logger.info("Force resubscribing to %s", symbol)
+    
+    # Step 1: Clear old subscription
+    if symbol in client._subscribed_symbols:
+        client._subscribed_symbols.discard(symbol)
+        logger.info("Removed old subscription: %s", symbol)
+    
+    # Step 2: Clear old candle history (optional - can keep for reference)
+    # if symbol in client._candle_history:
+    #     del client._candle_history[symbol]
+    
+    # Step 3: Clear old event
+    if symbol in client._candle_events:
+        del client._candle_events[symbol]
+    
+    # Step 4: Create fresh event
+    client._candle_events[symbol] = threading.Event()
+    
+    # Step 5: Fresh subscribe
+    client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+    
+    # Step 6: Wait for fresh data
+    event = client._candle_events.get(symbol)
+    if event:
+        event.wait(timeout=15)
+    
+    logger.info("Force resubscribed to %s", symbol)
+    return {"success": True, "symbol": symbol}
+
+
 # ─── Flask App ───
 app = Flask(__name__)
 
@@ -148,7 +186,7 @@ def health():
 
 @app.route("/set-pair", methods=["POST"])
 def set_pair():
-    """Set the active trading pair."""
+    """Set the active trading pair. Uses force resubscribe to fix stale data."""
     global active_pair
     data = request.get_json(force=True, silent=True) or {}
     symbol = data.get("symbol", "").strip().upper()
@@ -167,7 +205,9 @@ def set_pair():
         }), 404
 
     active_pair = symbol
-    ensure_subscribed(symbol)
+    
+    # Force resubscribe (fixes stale data issue)
+    force_resubscribe(symbol)
 
     return jsonify({
         "success": True,
@@ -176,6 +216,54 @@ def set_pair():
         "payout": get_payout_str(symbol),
         "isOTC": inst.get("isOTC", False),
         "isOpen": inst.get("isOpen", False),
+        "message": "Pair set with fresh subscription"
+    })
+
+
+@app.route("/refresh/<symbol>", methods=["POST"])
+def refresh_symbol(symbol):
+    """
+    Force refresh a specific symbol's subscription.
+    Use this when candles are stale/not updating.
+    
+    Usage: POST /refresh/USDEGP-OTC
+    """
+    symbol = client._normalize_symbol(symbol.strip().upper())
+    
+    # Verify instrument exists
+    inst = client.find_instrument(symbol)
+    if not inst:
+        return jsonify({
+            "error": f"Unknown symbol: {symbol}",
+            "hint": "Use /pairs to see available symbols",
+        }), 404
+    
+    # Force resubscribe
+    result = force_resubscribe(symbol)
+    
+    return jsonify({
+        "success": True,
+        "symbol": symbol,
+        "displayName": inst.get("displayName", symbol),
+        "payout": get_payout_str(symbol),
+        "message": "Symbol refreshed successfully"
+    })
+
+
+@app.route("/refresh", methods=["POST"])
+def refresh_active():
+    """
+    Force refresh the active pair's subscription.
+    
+    Usage: POST /refresh
+    """
+    result = force_resubscribe(active_pair)
+    
+    return jsonify({
+        "success": True,
+        "symbol": active_pair,
+        "payout": get_payout_str(active_pair),
+        "message": f"Active pair {active_pair} refreshed successfully"
     })
 
 
