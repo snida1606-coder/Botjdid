@@ -165,11 +165,23 @@ def force_resubscribe(symbol: str) -> dict:
     
     # Step 5: Fresh subscribe
     client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+    logger.info("Sent subscribe for %s", symbol)
     
-    # Step 6: Wait for fresh data
-    event = client._candle_events.get(symbol)
-    if event:
-        event.wait(timeout=15)
+    # Step 6: Wait for fresh data with retry
+    for i in range(3):
+        event = client._candle_events.get(symbol)
+        if event:
+            event.wait(timeout=10)
+        # Check if data arrived
+        if client._candle_history.get(symbol):
+            candles = client._candle_history[symbol]
+            if candles:
+                logger.info("Got %d candles for %s", len(candles), symbol)
+                break
+        logger.info("Retry %d for %s", i+1, symbol)
+        # If no data, subscribe again
+        client.subscribe(symbol, lookback_minutes=300, timeframe=60)
+        time.sleep(2)
     
     logger.info("Force resubscribed to %s", symbol)
     return {"success": True, "symbol": symbol}
