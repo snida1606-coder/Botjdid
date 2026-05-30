@@ -3709,15 +3709,30 @@ def auto_trade_loop(trader, context):
             _t.sleep(0.1)
         return {"error": "result timeout"}
 
+    # NOTE: this loop runs in its OWN event loop on a background thread. We must
+    # NOT touch `context.bot` here — its httpx client is bound to the main event
+    # loop, and using it from this loop (then closing this loop) corrupts the main
+    # bot (causing "Event loop is closed" on the next /start). We use the Telethon
+    # `sender` instead (thread-safe via run_coroutine_threadsafe), run in an
+    # executor so we never block this loop on network I/O.
+    def _send_sync(msg):
+        try:
+            return sender.send_message(trader.uid, msg)
+        except Exception:
+            return None
+
+    def _edit_sync(mid, msg):
+        try:
+            sender.edit_message(trader.uid, mid, msg)
+            return True
+        except Exception:
+            return False
+
     async def send(msg):
         try:
-            await context.bot.send_message(chat_id=trader.uid, text=msg,
-                                           entities=build_custom_emoji_entities(msg))
+            await loop.run_in_executor(None, _send_sync, msg)
         except Exception:
-            try:
-                await context.bot.send_message(chat_id=trader.uid, text=msg)
-            except Exception:
-                pass
+            pass
 
     async def sleep_until(ts):
         while True:
@@ -3731,20 +3746,14 @@ def auto_trade_loop(trader, context):
 
     async def status(msg):
         try:
-            if _status["id"] is None:
-                m = await context.bot.send_message(chat_id=trader.uid, text=msg,
-                                                   entities=build_custom_emoji_entities(msg))
-                _status["id"] = m.message_id
-            else:
-                await context.bot.edit_message_text(chat_id=trader.uid, message_id=_status["id"],
-                                                    text=msg, entities=build_custom_emoji_entities(msg))
+            if _status["id"] is not None:
+                ok = await loop.run_in_executor(None, _edit_sync, _status["id"], msg)
+                if ok:
+                    return
+            m = await loop.run_in_executor(None, _send_sync, msg)
+            _status["id"] = getattr(m, "id", None)
         except Exception:
-            try:
-                m = await context.bot.send_message(chat_id=trader.uid, text=msg,
-                                                   entities=build_custom_emoji_entities(msg))
-                _status["id"] = m.message_id
-            except Exception:
-                pass
+            pass
 
     def reset_status():
         _status["id"] = None
