@@ -102,33 +102,37 @@ def get_state(uid: int) -> UserState:
     return user_states[uid]
 
 # ══════════════ AUTO TRADE STATE (Per User) ══════════════
+AUTO_DEFAULT_OTC_PAIRS = [
+    "EURUSD-OTC", "EURAUD-OTC", "USDBRL-OTC", "USDARS-OTC",
+    "USDCOP-OTC", "USDNGN-OTC", "USDBDT-OTC", "USDTRY-OTC",
+    "USDPKR-OTC", "USDINR-OTC", "EURCAD-OTC", "EURGBP-OTC",
+    "NZDCAD-OTC", "USDMXN-OTC", "USDEGP-OTC", "USDDZD-OTC",
+]
+
 class AutoTradeState:
     def __init__(self, uid: int):
         self.uid = uid
         self.email = None
         self.password = None
         self.client = None
+        self.is_demo = True
         self.balance = 0.0
         self.starting_balance = 0.0
         self.tp_target = 0.0
         self.sl_target = 0.0
-        self.mtg = 1
+        self.risk_percent = 2.0
+        self.mtg_enabled = False
         self.strategy = 1
         self.strategy_name = "RSI basic"
         self.running = False
         self.trade_count = 0
         self.win_count = 0
         self.loss_count = 0
-        self.current_profit = 0.0
-        self.last_trade_result = None
-        self.pairs = [
-            "EURUSD-OTC", "EURAUD-OTC", "USDBRL-OTC", "USDARS-OTC",
-            "USDCOP-OTC", "USDNGN-OTC", "USDBDT-OTC", "USDTRY-OTC",
-            "USDPKR-OTC", "USDINR-OTC", "EURCAD-OTC", "EURGBP-OTC",
-            "NZDCAD-OTC", "USDMXN-OTC", "BNBUSD-OTC", "AVAXUSD-OTC",
-            "TRUMPUSD-OTC", "MSFT-OTC"
-        ]
-        self.api_url = "https://tradowix-api.onrender.com"
+        self.pairs = list(AUTO_DEFAULT_OTC_PAIRS)
+        # trade-result correlation (initialised when the loop starts)
+        self._last_opened = None
+        self._opened_evt = None
+        self._results = {}
 
 auto_traders: Dict[int, AutoTradeState] = {}
 def get_auto_trader(uid: int) -> AutoTradeState:
@@ -2876,6 +2880,8 @@ STATE_AUTO_MTG = 46
 STATE_AUTO_STRATEGY = 47
 STATE_AUTO_CONFIRM = 48
 STATE_AUTO_RUNNING = 49
+STATE_AUTO_ACCOUNT = 50
+STATE_AUTO_RISK = 51
 
 # ══════════════ HELPER FUNCTIONS FOR BUTTONS & ENTITIES ══════════════
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
@@ -3512,433 +3518,492 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     at = get_auto_trader(uid)
     at.running = False
 
-# ══════════════ AUTO TRADE HANDLERS ══════════════
+# ══════════════ AUTO TRADE HANDLERS (high-accuracy, WS-only) ══════════════
 
 STRATEGY_NAMES_AUTO = {
     1: "RSI basic", 2: "EMA filtered", 3: "WR divergence",
     4: "ADX stochastic", 5: "Ultra accurate", 6: "IROF pro"
 }
 
-def get_candles_auto(pair: str) -> list:
-    """Get candles from Tradowix API"""
+AUTO_MIN_CONF = 70          # minimum confidence required to place a trade
+AUTO_MAX_PAIRS = 24         # how many high-payout OTC pairs to scan each minute
+_UTC5 = timezone(timedelta(hours=5))
+
+
+def _auto_run_strategy(strategy_id, candles):
+    """Run one of the accurate Quotex strategies (1-6). Returns (direction, entry_dt, conf)."""
     try:
-        resp = req.get(f"https://tradowix-api.onrender.com/candles/{pair}", timeout=10)
-        if resp.status_code == 200:
-            return resp.json().get("candles", [])
-    except:
+        if strategy_id == 1:
+            return analyze_strategy1(candles, 75)
+        if strategy_id == 2:
+            return analyze_strategy2(candles, Strategy2Filters())
+        if strategy_id == 3:
+            return analyze_strategy3(candles, 75, 20)
+        if strategy_id == 4:
+            return analyze_strategy4(candles, 60)
+        if strategy_id == 5:
+            return analyze_strategy5(candles, 72)
+        if strategy_id == 6:
+            return analyze_strategy6(candles, 20, 10)
+    except Exception:
         pass
-    return []
+    return None, None, None
 
-def calc_rsi(candles, period=14):
-    if len(candles) < period + 1:
-        return 50.0
-    gains, losses = [], []
-    for i in range(1, len(candles)):
-        change = candles[i]['close'] - candles[i-1]['close']
-        gains.append(change if change > 0 else 0)
-        losses.append(abs(change) if change < 0 else 0)
-    if not gains:
-        return 50.0
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100.0
-    return 100 - (100 / (1 + (avg_gain / avg_loss)))
 
-def calc_ema(candles, period):
-    if len(candles) < period:
-        return candles[-1]['close']
-    mult = 2 / (period + 1)
-    ema = candles[0]['close']
-    for c in candles[1:]:
-        ema = (c['close'] * mult) + (ema * (1 - mult))
-    return ema
+def _auto_select_pairs(client, limit=AUTO_MAX_PAIRS):
+    """Pick the highest-payout, currently-open OTC pairs from the live instrument list."""
+    scored = []
+    for inst in (client.instruments or []):
+        try:
+            if not inst.get("isOTC"):
+                continue
+            if inst.get("isOpen") is False:
+                continue
+            payout = inst.get("effectiveTurboPayoutRate") or inst.get("turboPayoutRate") or 0
+            sym = inst.get("symbol")
+            if sym and payout >= 0.80:
+                scored.append((payout, sym))
+        except Exception:
+            continue
+    scored.sort(key=lambda x: x[0], reverse=True)
+    pairs = [s for _, s in scored[:limit]]
+    return pairs or list(AUTO_DEFAULT_OTC_PAIRS)
 
-def calc_boll(candles, period=20):
-    if len(candles) < period:
-        return 0, 0, 0
-    prices = [c['close'] for c in candles[-period:]]
-    sma = sum(prices) / period
-    std = (sum((p - sma) ** 2 for p in prices) / period) ** 0.5
-    return sma + (std * 2), sma, sma - (std * 2)
 
-def get_signal(candles, strategy_id):
-    if len(candles) < 20:
-        return {"signal": "HOLD", "confidence": 0, "reason": "Insufficient data"}
-    rsi = calc_rsi(candles)
-    price = candles[-1]['close']
-    
-    if strategy_id == 1:  # RSI
-        if rsi < 30:
-            return {"signal": "BUY", "confidence": min(100, 100 - rsi + 20), "reason": f"RSI Oversold ({rsi:.1f})"}
-        elif rsi > 70:
-            return {"signal": "SELL", "confidence": min(100, rsi - 20), "reason": f"RSI Overbought ({rsi:.1f})"}
-        return {"signal": "HOLD", "confidence": 50, "reason": f"RSI Neutral ({rsi:.1f})"}
-    
-    elif strategy_id == 2:  # EMA
-        ema9 = calc_ema(candles, 9)
-        ema21 = calc_ema(candles, 21)
-        if ema9 > ema21 and price > ema9 and rsi < 60:
-            return {"signal": "BUY", "confidence": 80, "reason": f"EMA Bullish"}
-        elif ema9 < ema21 and price < ema9 and rsi > 40:
-            return {"signal": "SELL", "confidence": 80, "reason": f"EMA Bearish"}
-        return {"signal": "HOLD", "confidence": 50, "reason": "EMA Neutral"}
-    
-    elif strategy_id == 3:  # WR
-        if rsi < 30:
-            return {"signal": "BUY", "confidence": 75, "reason": f"WR Oversold"}
-        elif rsi > 70:
-            return {"signal": "SELL", "confidence": 75, "reason": f"WR Overbought"}
-        return {"signal": "HOLD", "confidence": 50, "reason": "WR Neutral"}
-    
-    elif strategy_id == 4:  # ADX
-        if rsi < 35:
-            return {"signal": "BUY", "confidence": 75, "reason": f"ADX Oversold"}
-        elif rsi > 65:
-            return {"signal": "SELL", "confidence": 75, "reason": f"ADX Overbought"}
-        return {"signal": "HOLD", "confidence": 50, "reason": "ADX Neutral"}
-    
-    elif strategy_id == 5:  # Ultra
-        ema9 = calc_ema(candles, 9)
-        ema21 = calc_ema(candles, 21)
-        upper, _, lower = calc_boll(candles)
-        if rsi < 25 and ema9 > ema21 and price <= lower:
-            return {"signal": "BUY", "confidence": 90, "reason": "Ultra Signal BUY"}
-        elif rsi > 75 and ema9 < ema21 and price >= upper:
-            return {"signal": "SELL", "confidence": 90, "reason": "Ultra Signal SELL"}
-        return {"signal": "HOLD", "confidence": 50, "reason": "Ultra Neutral"}
-    
-    elif strategy_id == 6:  # IROF
-        upper, _, lower = calc_boll(candles)
-        if price <= lower and rsi < 35:
-            return {"signal": "BUY", "confidence": 85, "reason": f"IROF BUY"}
-        elif price >= upper and rsi > 65:
-            return {"signal": "SELL", "confidence": 85, "reason": f"IROF SELL"}
-        return {"signal": "HOLD", "confidence": 50, "reason": "IROF Neutral"}
-    
-    return {"signal": "HOLD", "confidence": 50, "reason": "Unknown"}
+def _auto_acct_balance(trader):
+    """Current balance for the selected account (demo / real)."""
+    try:
+        b = trader.client.balance or {}
+        v = b.get("demoBalance") if trader.is_demo else b.get("realBalance")
+        if v is None:
+            v = b.get("currentBalance")
+        if v is None:
+            rb = trader.client.get_balance() or {}
+            v = (rb.get("demoBalance") if trader.is_demo else rb.get("realBalance"))
+            if v is None:
+                v = rb.get("currentBalance")
+        return float(v or 0)
+    except Exception:
+        return float(trader.balance or 0)
 
+
+def _auto_classify(res, side):
+    """Decode a broker tradeResult into 'win' | 'loss' | 'tie'.
+    The broker sends numeric codes (1=win, 2=tie, 3=loss); fall back to
+    price comparison if the code is missing."""
+    rc = res.get("result")
+    op = res.get("openPrice")
+    cp = res.get("closePrice")
+    try:
+        profit = float(res.get("profit"))
+    except (TypeError, ValueError):
+        profit = None
+    if rc == 1:
+        return "win"
+    if rc == 2:
+        return "tie"
+    if rc == 3:
+        return "loss"
+    if profit is not None and profit > 0:
+        return "win"
+    if op is not None and cp is not None:
+        if cp == op:
+            return "tie"
+        went_up = cp > op
+        won = (went_up and side == "call") or ((not went_up) and side == "put")
+        return "win" if won else "loss"
+    return "loss"
+
+
+def _auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, amount):
+    arrow = "📈" if direction == "CALL" else "📉"
+    dword = "UP  /  CALL" if direction == "CALL" else "DOWN  /  PUT"
+    title = fancy_font("SMZX AUTO TRADE")
+    return (
+        f"👑 {title} 👑\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Pair      : {pair}\n"
+        f"{arrow} Signal    : {dword}\n"
+        f"⏰ Entry     : {entry_label}\n"
+        f"🕐 Expiry    : {expiry_label}\n"
+        f"💲 Amount    : ${amount:.2f}  ({trader.risk_percent:.1f}%)\n"
+        f"🎯 Accuracy  : {conf:.0f}%\n"
+        f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
+        f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Placing at entry time...\n"
+        f"✨ Powered by SMZX ✨"
+    )
+
+
+def auto_trade_loop(trader, context):
+    """High-accuracy auto trade loop — TradoWix WebSocket only (candles + execution)."""
+    import time as _t
+    import asyncio as _aio
+
+    loop = _aio.new_event_loop()
+    _aio.set_event_loop(loop)
+    client = trader.client
+
+    # ----- trade-result correlation via WS callbacks -----
+    trader._results = {}
+    trader._last_opened = None
+    trader._opened_evt = threading.Event()
+
+    def _on_open(data):
+        trader._last_opened = data
+        trader._opened_evt.set()
+
+    def _on_res(data):
+        tid = data.get("tradeId") or data.get("id")
+        if tid:
+            trader._results[tid] = data
+
+    client.on_trade_opened(_on_open)
+    client.on_trade_result(_on_res)
+
+    def place_and_wait(pair, side, amount):
+        """Place a 1-min turbo trade and block until the broker settles it."""
+        trader._opened_evt.clear()
+        try:
+            client.place_trade(pair, side, amount, duration_minutes=1, is_demo=trader.is_demo)
+        except Exception as e:
+            return {"error": f"place failed: {e}"}
+        if not trader._opened_evt.wait(timeout=8):
+            return {"error": "no tradeOpened"}
+        opened = trader._last_opened or {}
+        tid = opened.get("id") or opened.get("tradeId")
+        if not tid:
+            return {"error": "no trade id"}
+        deadline = _t.time() + 240
+        while _t.time() < deadline:
+            if tid in trader._results:
+                return trader._results.pop(tid)
+            _t.sleep(0.12)
+        return {"error": "result timeout"}
+
+    async def send(msg):
+        try:
+            await context.bot.send_message(chat_id=trader.uid, text=msg,
+                                           entities=build_custom_emoji_entities(msg))
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=trader.uid, text=msg)
+            except Exception:
+                pass
+
+    async def sleep_until(ts):
+        while True:
+            d = ts - _t.time()
+            if d <= 0:
+                return
+            await _aio.sleep(min(d, 0.4))
+
+    async def run():
+        trader.pairs = _auto_select_pairs(client)
+        for p in trader.pairs:
+            try:
+                client.subscribe(p, lookback_minutes=240, timeframe=60)
+            except Exception:
+                pass
+        await send(
+            f"🚀 {fancy_font('AUTO TRADE STARTED')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+            f"💎 Balance   : ${trader.balance:.2f}\n"
+            f"🎯 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
+            f"💲 Risk      : {trader.risk_percent:.1f}% / trade\n"
+            f"🔥 Martingale: {'ON (1-step)' if trader.mtg_enabled else 'OFF'}\n"
+            f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
+            f"🔍 Scanning  : {len(trader.pairs)} OTC pairs\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⏳ Waiting for first signal... (/stop to stop)"
+        )
+        await _aio.sleep(6)  # let candle history load
+
+        trader.balance = _auto_acct_balance(trader)
+        trader.starting_balance = trader.balance
+
+        while trader.running:
+            # ---- TP / SL check ----
+            trader.balance = _auto_acct_balance(trader)
+            pnl = trader.balance - trader.starting_balance
+            if trader.tp_target > 0 and pnl >= trader.tp_target:
+                await send(
+                    f"🏆 {fancy_font('TARGET REACHED')}\n"
+                    f"💎 ${trader.starting_balance:.2f} → ${trader.balance:.2f}\n"
+                    f"📈 Profit : +${pnl:.2f}\n"
+                    f"📊 {trader.win_count}W / {trader.loss_count}L"
+                )
+                trader.running = False
+                break
+            if trader.sl_target > 0 and pnl <= -trader.sl_target:
+                await send(
+                    f"🔰 {fancy_font('STOP LOSS HIT')}\n"
+                    f"💎 ${trader.starting_balance:.2f} → ${trader.balance:.2f}\n"
+                    f"📉 Loss : -${abs(pnl):.2f}\n"
+                    f"📊 {trader.win_count}W / {trader.loss_count}L"
+                )
+                trader.running = False
+                break
+
+            # ---- wait for the next minute boundary, then act on the fresh closed candle ----
+            now = _t.time()
+            boundary = (int(now // 60) + 1) * 60
+            await sleep_until(boundary + 0.25)
+            if not trader.running:
+                break
+
+            # ---- scan all pairs, pick the best signal for THIS candle ----
+            best = None  # (conf, pair, direction)
+            for pair in trader.pairs:
+                if not trader.running:
+                    break
+                try:
+                    candles = client.get_candles(pair, timeframe=60, count=200, timeout=2)
+                except Exception:
+                    candles = []
+                if not candles or len(candles) < 55:
+                    continue
+                last_t = candles[-1]["time"]
+                scale = 1000 if last_t > 1e12 else 1
+                cm = boundary * scale
+                closed = [c for c in candles if c["time"] < cm]   # drop the forming candle
+                if len(closed) < 55:
+                    closed = candles
+                direction, _, conf = _auto_run_strategy(trader.strategy, closed)
+                if direction and conf and conf >= AUTO_MIN_CONF:
+                    if best is None or conf > best[0]:
+                        best = (conf, pair, direction)
+
+            if not best:
+                continue
+
+            conf, pair, direction = best
+            side = "call" if direction == "CALL" else "put"
+            entry_label = datetime.fromtimestamp(boundary, tz=_UTC5).strftime("%H:%M:%S")
+            expiry_label = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
+            base_amt = round(max(1.0, trader.balance * trader.risk_percent / 100.0), 2)
+
+            await send(_auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, base_amt))
+
+            # ---- place the base trade (we are at boundary+0.25s → expires at boundary+60) ----
+            res = await loop.run_in_executor(None, place_and_wait, pair, side, base_amt)
+            trader.trade_count += 1
+            if res.get("error"):
+                await send(f"⚠️ Trade error: {res['error']}")
+                continue
+
+            outcome = _auto_classify(res, side)
+
+            if outcome != "loss":
+                # win / tie → refresh real balance (credit lands via balanceUpdate)
+                await _aio.sleep(0.8)
+                trader.balance = _auto_acct_balance(trader)
+                pnl = trader.balance - trader.starting_balance
+                if outcome == "win":
+                    trader.win_count += 1
+                    profit = float(res.get("profit") or round(base_amt * 0.9, 2))
+                    await send(
+                        f"✅ {fancy_font('WIN')}  +${abs(profit):.2f}\n"
+                        f"💎 Balance : ${trader.balance:.2f}\n"
+                        f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                    )
+                else:
+                    await send(
+                        f"➖ {fancy_font('TIE')}  (refund)\n"
+                        f"💎 Balance : ${trader.balance:.2f}\n"
+                        f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                    )
+                continue
+
+            # ---- LOSS (stake already deducted → balance is final) ----
+            trader.loss_count += 1
+            trader.balance = _auto_acct_balance(trader)
+            pnl = trader.balance - trader.starting_balance
+            await send(
+                f"❌ {fancy_font('LOSS')}  -${base_amt:.2f}\n"
+                f"💎 Balance : ${trader.balance:.2f}\n"
+                f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+            )
+
+            if not trader.mtg_enabled:
+                continue
+
+            # ---- ZERO-DELAY 1-STEP MARTINGALE (same side, double, next candle) ----
+            mtg_amt = round(base_amt * 2, 2)
+            mtg_entry = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
+            await send(
+                f"🔥 {fancy_font('MARTINGALE')}  (Step 1)\n"
+                f"📊 {pair}   {'UP/CALL' if side == 'call' else 'DOWN/PUT'}\n"
+                f"💲 ${mtg_amt:.2f}  (2x)    ⏰ {mtg_entry}\n"
+                f"⚡ Zero-delay — placing now..."
+            )
+            res2 = await loop.run_in_executor(None, place_and_wait, pair, side, mtg_amt)
+            trader.trade_count += 1
+            if res2.get("error"):
+                await send(f"⚠️ Martingale error: {res2['error']}")
+                continue
+            out2 = _auto_classify(res2, side)
+            await _aio.sleep(0.8)
+            trader.balance = _auto_acct_balance(trader)
+            pnl = trader.balance - trader.starting_balance
+            if out2 == "win":
+                trader.win_count += 1
+                p2 = float(res2.get("profit") or round(mtg_amt * 0.9, 2))
+                await send(
+                    f"✅ {fancy_font('MTG WIN')}  +${abs(p2):.2f}\n"
+                    f"💎 Balance : ${trader.balance:.2f}\n"
+                    f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                )
+            elif out2 == "tie":
+                await send(
+                    f"➖ {fancy_font('MTG TIE')}  (refund)\n"
+                    f"💎 Balance : ${trader.balance:.2f}\n"
+                    f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                )
+            else:
+                trader.loss_count += 1
+                await send(
+                    f"❌ {fancy_font('MTG LOSS')}  -${mtg_amt:.2f}\n"
+                    f"💎 Balance : ${trader.balance:.2f}\n"
+                    f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                )
+            # true 1-step → back to base amount on the next cycle
+
+        await send(
+            f"🔰 {fancy_font('AUTO TRADE STOPPED')}\n"
+            f"💎 ${trader.starting_balance:.2f} → ${trader.balance:.2f}\n"
+            f"📊 {trader.trade_count} trades  |  {trader.win_count}W / {trader.loss_count}L"
+        )
+
+    try:
+        loop.run_until_complete(run())
+    except Exception as e:
+        try:
+            loop.run_until_complete(send(f"⚠️ Auto loop crashed: {e}"))
+        except Exception:
+            pass
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+
+
+# ══════════════ AUTO TRADE — conversation handlers (state-routed) ══════════════
 async def auto_trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Auto Trade - ask for email"""
+    """Entry point (menu button). Ask for the TradoWix email."""
     query = update.callback_query
     uid = query.from_user.id
     if not is_authorized(uid):
         await query.answer("⛔ Access denied. Contact Admin.", show_alert=True)
         return
     await query.answer()
-    
     trader = get_auto_trader(uid)
     if trader.running:
-        msg = "⚠️ Auto Trade is already running!\nUse /stop to stop first."
-        entities = build_custom_emoji_entities(msg)
-        await query.message.reply_text(msg, entities=entities)
+        msg = "⚠️ Auto Trade is already running!\nUse /stop first."
+        await query.message.reply_text(msg, entities=build_custom_emoji_entities(msg))
         return
-    
+    context.user_data['strategy_active'] = False
     context.user_data['state'] = STATE_AUTO_LOGIN_EMAIL
-    msg = "🚀 *Auto Trade Setup*\n\n📧 Please enter your TradoWix email:"
-    entities = build_custom_emoji_entities(msg)
-    await query.message.reply_text(msg, entities=entities, parse_mode="Markdown")
+    msg = f"🚀 {fancy_font('AUTO TRADE SETUP')}\n\n📧 Enter your TradoWix email:"
+    await query.message.reply_text(msg, entities=build_custom_emoji_entities(msg))
 
-async def auto_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store email"""
-    uid = update.effective_user.id
-    trader = get_auto_trader(uid)
-    trader.email = update.message.text.strip()
-    context.user_data['state'] = STATE_AUTO_LOGIN_PASSWORD
-    msg = "🔐 *Enter your TradoWix password:*"
-    entities = build_custom_emoji_entities(msg)
-    await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
 
-async def auto_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store password and login"""
-    uid = update.effective_user.id
-    trader = get_auto_trader(uid)
-    trader.password = update.message.text.strip()
-    
-    msg = "⏳ *Logging in to TradoWix...*"
-    entities = build_custom_emoji_entities(msg)
-    loading_msg = await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
-    
-    try:
-        from tradowix_client import TradoWixClient
-        client = TradoWixClient()
-        client.login(trader.email, trader.password)
-        client.connect(blocking=True)
-        trader.client = client
-        bal = client.get_balance()
-        trader.balance = bal.get("currentBalance", 0) or bal.get("demoBalance", 0)
-        trader.starting_balance = trader.balance
-        
-        await loading_msg.edit_text(
-            f"✅ *Login Successful!*\n\n📊 *Balance:* `${trader.balance:.2f}`\n\n"
-            f"Enter TP (Take Profit) in $ (e.g., 7):"
-        )
-        context.user_data['state'] = STATE_AUTO_TP
-        
-    except Exception as e:
-        await loading_msg.edit_text(f"❌ *Login Failed*\n\n{str(e)}\n\nUse /start to try again.")
-        context.user_data.clear()
-        return ConversationHandler.END
-
-async def auto_tp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store TP"""
-    uid = update.effective_user.id
-    trader = get_auto_trader(uid)
-    try:
-        tp = float(update.message.text.strip())
-        if tp <= 0:
-            raise ValueError()
-        trader.tp_target = tp
-    except:
-        await update.message.reply_text("❌ Invalid TP. Enter a positive number:")
-        return STATE_AUTO_TP
-    
-    context.user_data['state'] = STATE_AUTO_SL
-    msg = f"✅ *TP Set: ${tp:.2f}*\n\nEnter SL (Stop Loss) in $ (e.g., 12):"
-    entities = build_custom_emoji_entities(msg)
-    await update.message.reply_text(msg, entities=entities, parse_mode="Markdown")
-
-async def auto_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store SL and ask MTG"""
-    uid = update.effective_user.id
-    trader = get_auto_trader(uid)
-    try:
-        sl = float(update.message.text.strip())
-        if sl <= 0:
-            raise ValueError()
-        trader.sl_target = sl
-    except:
-        await update.message.reply_text("❌ Invalid SL. Enter a positive number:")
-        return STATE_AUTO_SL
-    
-    context.user_data['state'] = STATE_AUTO_MTG
-    msg = (
-        f"✅ *SL Set: ${sl:.2f}*\n\n"
-        f"📊 *Balance:* `${trader.balance:.2f}`\n"
-        f"🎯 *TP:* `${trader.tp_target:.2f}` | 🛡️ *SL:* `${sl:.2f}`\n\n"
-        f"*Select Martingale Step:*"
-    )
-    buttons = [
-        [InlineKeyboardButton("1️⃣ Step 1 (No Martingale)", callback_data="at_mtg_1")],
-        [InlineKeyboardButton("2️⃣ Step 2 (Martingale x2)", callback_data="at_mtg_2")],
-    ]
-    entities = build_custom_emoji_entities(msg)
-    await update.message.reply_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-
-async def auto_mtg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store MTG and ask strategy"""
+async def auto_account_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     trader = get_auto_trader(uid)
-    trader.mtg = int(query.data.split("_")[-1])
-    
+    trader.is_demo = query.data.endswith("demo")
+    trader.balance = _auto_acct_balance(trader)
+    trader.starting_balance = trader.balance
     context.user_data['state'] = STATE_AUTO_STRATEGY
     msg = (
-        f"✅ *MTG: Step {trader.mtg}*\n\n"
-        f"*Select Trading Strategy (1-6):*"
+        f"🏦 Account : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"💎 Balance : ${trader.balance:.2f}\n\n"
+        f"🤖 Select Strategy (1-6):"
     )
     buttons = [
-        [InlineKeyboardButton("1️⃣ RSI basic", callback_data="at_strat_1"),
-         InlineKeyboardButton("2️⃣ EMA filtered", callback_data="at_strat_2")],
-        [InlineKeyboardButton("3️⃣ WR divergence", callback_data="at_strat_3"),
-         InlineKeyboardButton("4️⃣ ADX stochastic", callback_data="at_strat_4")],
-        [InlineKeyboardButton("5️⃣ Ultra accurate", callback_data="at_strat_5"),
-         InlineKeyboardButton("6️⃣ IROF pro", callback_data="at_strat_6")],
+        [InlineKeyboardButton("1️⃣ RSI basic", callback_data="atx_strat_1"),
+         InlineKeyboardButton("2️⃣ EMA filtered", callback_data="atx_strat_2")],
+        [InlineKeyboardButton("3️⃣ WR divergence", callback_data="atx_strat_3"),
+         InlineKeyboardButton("4️⃣ ADX stochastic", callback_data="atx_strat_4")],
+        [InlineKeyboardButton("5️⃣ Ultra accurate", callback_data="atx_strat_5"),
+         InlineKeyboardButton("6️⃣ IROF pro", callback_data="atx_strat_6")],
     ]
-    entities = build_custom_emoji_entities(msg)
-    await query.message.edit_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg),
+                                  reply_markup=InlineKeyboardMarkup(buttons))
 
-async def auto_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store strategy and show confirmation"""
+
+async def auto_strategy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     trader = get_auto_trader(uid)
     trader.strategy = int(query.data.split("_")[-1])
     trader.strategy_name = STRATEGY_NAMES_AUTO.get(trader.strategy, "Unknown")
-    
+    context.user_data['state'] = STATE_AUTO_TP
     msg = (
-        f"🎯 *Auto Trade Configuration*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📧 *Account:* `{trader.email}`\n"
-        f"💰 *Balance:* `${trader.balance:.2f}`\n"
-        f"🎯 *TP:* `${trader.tp_target:.2f}`\n"
-        f"🛡️ *SL:* `${trader.sl_target:.2f}`\n"
-        f"📈 *MTG:* Step {trader.mtg}\n"
-        f"🎮 *Strategy:* `{trader.strategy}. {trader.strategy_name}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"*Ready to start Auto Trade?*"
+        f"🤖 Strategy : {trader.strategy}. {trader.strategy_name}\n\n"
+        f"🎯 Enter Take Profit (TP) in $ (e.g. 10):"
     )
-    buttons = [
-        [InlineKeyboardButton("✅ START AUTO TRADE", callback_data="at_start")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="at_cancel")],
-    ]
-    entities = build_custom_emoji_entities(msg)
-    await query.message.edit_text(msg, entities=entities, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
 
-async def auto_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start auto trading"""
+
+async def auto_mtg_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     trader = get_auto_trader(uid)
-    
+    trader.mtg_enabled = query.data.endswith("on")
+    context.user_data['state'] = STATE_AUTO_CONFIRM
+    msg = (
+        f"🎯 {fancy_font('CONFIRM AUTO TRADE')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"💎 Balance   : ${trader.balance:.2f}\n"
+        f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
+        f"🎯 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
+        f"💲 Risk      : {trader.risk_percent:.1f}% / trade\n"
+        f"🔥 Martingale: {'ON (1-step)' if trader.mtg_enabled else 'OFF'}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Ready?"
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ START AUTO TRADE", callback_data="atx_start")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="atx_cancel")],
+    ]
+    await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg),
+                                  reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def auto_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    if not trader.client:
+        msg = "⚠️ Not logged in. Use /start → Auto Trade again."
+        await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
+        return
     trader.running = True
     trader.trade_count = 0
     trader.win_count = 0
     trader.loss_count = 0
-    
-    msg = (
-        f"🚀 *Auto Trade Started!*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *Balance:* `${trader.balance:.2f}`\n"
-        f"🎯 *Target:* `${trader.tp_target:.2f}` profit\n"
-        f"🛡️ *Limit:* `${trader.sl_target:.2f}` loss\n"
-        f"🎮 *Strategy:* `{trader.strategy_name}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏳ Scanning pairs...\nUse /stop to stop."
-    )
-    entities = build_custom_emoji_entities(msg)
-    await query.message.edit_text(msg, entities=entities, parse_mode="Markdown")
-    
-    # Start trading loop
+    context.user_data['state'] = None
+    msg = f"🚀 {fancy_font('STARTING')}...\n⏳ Scanning pairs for the next signal..."
+    await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
     threading.Thread(target=auto_trade_loop, args=(trader, context), daemon=True).start()
 
-async def auto_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel auto trade"""
+
+async def auto_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    msg = "❌ *Auto Trade Cancelled.*\nUse /start to begin again."
-    entities = build_custom_emoji_entities(msg)
-    await query.message.edit_text(msg, entities=entities, parse_mode="Markdown")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-def auto_trade_loop(trader, context):
-    """Main auto trading loop"""
-    import time
-    import asyncio
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def send(msg, parse="Markdown"):
-        try:
-            await context.bot.send_message(chat_id=trader.uid, text=msg, parse_mode=parse)
-        except:
-            pass
-    
-    async def run():
-        await send("🔍 *Starting Auto Trade Scan...*")
-        last_trade = 0
-        base_amount = 1.0
-        
-        while trader.running:
-            try:
-                # Check TP/SL
-                if trader.client:
-                    bal = trader.client.get_balance()
-                    trader.balance = bal.get("currentBalance", 0) or bal.get("demoBalance", 0)
-                
-                profit = trader.balance - trader.starting_balance
-                
-                if profit >= trader.tp_target:
-                    trader.running = False
-                    await send(f"🏆 *TARGET REACHED!*\n\n💰 Started: `${trader.starting_balance:.2f}`\n💵 Now: `${trader.balance:.2f}`\n📈 Profit: `${profit:.2f}` ✅\n📊 Trades: {trader.trade_count} ({trader.win_count}W/{trader.loss_count}L)")
-                    break
-                
-                if profit <= -trader.sl_target:
-                    trader.running = False
-                    await send(f"🛑 *STOP LOSS HIT!*\n\n💰 Started: `${trader.starting_balance:.2f}`\n💵 Now: `${trader.balance:.2f}`\n📉 Loss: `${abs(profit):.2f}` ❌\n📊 Trades: {trader.trade_count}")
-                    break
-                
-                # Scan pairs
-                for pair in trader.pairs:
-                    if not trader.running:
-                        break
-                    
-                    try:
-                        candles = get_candles_auto(pair)
-                        if not candles or len(candles) < 20:
-                            continue
-                        
-                        signal = get_signal(candles, trader.strategy)
-                        
-                        if signal["signal"] != "HOLD" and signal["confidence"] >= 70:
-                            now = time.time()
-                            if now - last_trade < 30:
-                                continue
-                            
-                            direction = "call" if signal["signal"] == "BUY" else "put"
-                            amount = base_amount
-                            if trader.mtg == 2 and trader.last_trade_result == "loss":
-                                amount = base_amount * 2
-                            
-                            if trader.client:
-                                try:
-                                    tid = trader.client.place_trade(pair, direction, amount, 1, is_demo=False)
-                                    last_trade = now
-                                    trader.trade_count += 1
-                                    
-                                    await send(
-                                        f"⚡ *AUTO TRADE*\n━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"📊 Pair: `{pair}`\n"
-                                        f"{'📈' if direction=='call' else '📉'} Direction: {signal['signal']}\n"
-                                        f"💰 Amount: `${amount:.2f}`\n"
-                                        f"🎯 Confidence: `{signal['confidence']:.0f}%`\n"
-                                        f"🎮 Strategy: `{trader.strategy_name}`\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━\n🔄 Placed! Waiting result..."
-                                    )
-                                    
-                                    await asyncio.sleep(65)
-                                    
-                                    new_bal = trader.client.get_balance().get("currentBalance", 0) or trader.client.get_balance().get("demoBalance", 0)
-                                    change = new_bal - trader.balance
-                                    trader.balance = new_bal
-                                    
-                                    if change > 0:
-                                        trader.win_count += 1
-                                        trader.last_trade_result = "win"
-                                        await send(f"✅ *WIN*\n💵 Balance: `${trader.balance:.2f}` | Change: `${change:+.2f}`\n📊 W/L: {trader.win_count}/{trader.loss_count}")
-                                    else:
-                                        trader.loss_count += 1
-                                        trader.last_trade_result = "loss"
-                                        await send(f"❌ *LOSS*\n💵 Balance: `${trader.balance:.2f}` | Change: `${change:+.2f}`\n📊 W/L: {trader.win_count}/{trader.loss_count}")
-                                        
-                                except Exception as e:
-                                    await send(f"⚠️ Trade Error: {str(e)}")
-                                    continue
-                        
-                        await asyncio.sleep(2)
-                    except:
-                        continue
-                
-                await asyncio.sleep(10)
-                
-            except:
-                await asyncio.sleep(10)
-        
-        await send(f"🛑 *Auto Trade Stopped*\n💰 {trader.starting_balance:.2f} → {trader.balance:.2f}\n📊 {trader.trade_count} trades")
-    
-    loop.run_until_complete(run())
-
-auto_trade_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(auto_trade_start, pattern="^auto_trade_start$")],
-    states={
-        STATE_AUTO_LOGIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_email)],
-        STATE_AUTO_LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_password)],
-        STATE_AUTO_TP: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_tp)],
-        STATE_AUTO_SL: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_sl)],
-        STATE_AUTO_MTG: [CallbackQueryHandler(auto_mtg, pattern=r"^at_mtg_\d+$")],
-        STATE_AUTO_STRATEGY: [CallbackQueryHandler(auto_strategy, pattern=r"^at_strat_\d+$")],
-        STATE_AUTO_CONFIRM: [
-            CallbackQueryHandler(auto_start, pattern="^at_start$"),
-            CallbackQueryHandler(auto_cancel, pattern="^at_cancel$"),
-        ],
-    },
-    fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-)
+    context.user_data['state'] = None
+    msg = "❌ Auto Trade cancelled.\nUse /start to begin again."
+    await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
 
 # ══════════════ GLOBAL TEXT HANDLER (all states) ══════════════
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4035,6 +4100,112 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 entities = build_custom_emoji_entities(msg)
                 await update.message.reply_text(msg, entities=entities)
             return
+
+    # ---- Auto Trade setup states ----
+    if state == STATE_AUTO_LOGIN_EMAIL:
+        trader = get_auto_trader(uid)
+        trader.email = text
+        context.user_data['state'] = STATE_AUTO_LOGIN_PASSWORD
+        m = "🔰 Enter your TradoWix password:"
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+        return
+
+    elif state == STATE_AUTO_LOGIN_PASSWORD:
+        trader = get_auto_trader(uid)
+        trader.password = text
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        wait = "⏳ Logging in to TradoWix..."
+        loading = await update.message.reply_text(wait, entities=build_custom_emoji_entities(wait))
+        try:
+            from tradowix_client import TradoWixClient
+            def _do_login():
+                c = TradoWixClient()
+                c.login(trader.email, trader.password)
+                c.connect()
+                return c
+            client = await asyncio.to_thread(_do_login)
+            trader.client = client
+            await asyncio.sleep(1.5)
+            ui = client.user_info or {}
+            b = client.balance or {}
+            demo_b = ui.get("demoBalance")
+            real_b = ui.get("realBalance")
+            if demo_b is None:
+                demo_b = b.get("demoBalance", 0)
+            if real_b is None:
+                real_b = b.get("realBalance", 0)
+            context.user_data['state'] = STATE_AUTO_ACCOUNT
+            m = (
+                f"✅ {fancy_font('LOGIN OK')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💎 Demo : ${float(demo_b or 0):.2f}\n"
+                f"💲 Real : ${float(real_b or 0):.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🏦 Select account:"
+            )
+            buttons = [[InlineKeyboardButton("🧪 DEMO", callback_data="atx_acc_demo"),
+                        InlineKeyboardButton("💲 REAL", callback_data="atx_acc_real")]]
+            await loading.edit_text(m, entities=build_custom_emoji_entities(m),
+                                    reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception as e:
+            context.user_data['state'] = None
+            err = f"❌ Login failed: {e}\nUse /start to try again."
+            await loading.edit_text(err, entities=build_custom_emoji_entities(err))
+        return
+
+    elif state == STATE_AUTO_TP:
+        trader = get_auto_trader(uid)
+        try:
+            tp = float(text.strip())
+            if tp <= 0:
+                raise ValueError()
+        except Exception:
+            m = "❌ Invalid TP. Enter a positive number (e.g. 10):"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+            return
+        trader.tp_target = tp
+        context.user_data['state'] = STATE_AUTO_SL
+        m = f"✅ TP : ${tp:.2f}\n\n🔰 Enter Stop Loss (SL) in $ (e.g. 15):"
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+        return
+
+    elif state == STATE_AUTO_SL:
+        trader = get_auto_trader(uid)
+        try:
+            sl = float(text.strip())
+            if sl <= 0:
+                raise ValueError()
+        except Exception:
+            m = "❌ Invalid SL. Enter a positive number (e.g. 15):"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+            return
+        trader.sl_target = sl
+        context.user_data['state'] = STATE_AUTO_RISK
+        m = f"✅ SL : ${sl:.2f}\n\n💲 Enter Risk per trade in % of balance (e.g. 2):"
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+        return
+
+    elif state == STATE_AUTO_RISK:
+        trader = get_auto_trader(uid)
+        try:
+            r = float(text.strip())
+            if r <= 0 or r > 100:
+                raise ValueError()
+        except Exception:
+            m = "❌ Invalid risk. Enter a number between 0 and 100 (e.g. 2):"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m))
+            return
+        trader.risk_percent = r
+        context.user_data['state'] = STATE_AUTO_MTG
+        m = f"✅ Risk : {r:.1f}% / trade\n\n🔥 1-step Martingale (loss pe same-side double)?"
+        buttons = [[InlineKeyboardButton("✅ MTG ON", callback_data="atx_mtg_on"),
+                    InlineKeyboardButton("🚫 MTG OFF", callback_data="atx_mtg_off")]]
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m),
+                                        reply_markup=InlineKeyboardMarkup(buttons))
+        return
 
     # ---- Other existing states ----
     if state == STATE_CHECKER_CUSTOM_DATE:
@@ -4932,9 +5103,13 @@ def main():
     app.add_handler(CommandHandler("continue", continue_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
 
-    # Auto Trade Handler
-    app.add_handler(auto_trade_conv)
+    # Auto Trade Handlers
     app.add_handler(CallbackQueryHandler(auto_trade_start, pattern="^auto_trade_start$"))
+    app.add_handler(CallbackQueryHandler(auto_account_cb, pattern=r"^atx_acc_(demo|real)$"))
+    app.add_handler(CallbackQueryHandler(auto_strategy_cb, pattern=r"^atx_strat_\d+$"))
+    app.add_handler(CallbackQueryHandler(auto_mtg_cb, pattern=r"^atx_mtg_(on|off)$"))
+    app.add_handler(CallbackQueryHandler(auto_start_cb, pattern="^atx_start$"))
+    app.add_handler(CallbackQueryHandler(auto_cancel_cb, pattern="^atx_cancel$"))
 
     print(f"{Fore.GREEN}[✓] Bot polling...{Style.RESET_ALL}")
     app.run_polling()
