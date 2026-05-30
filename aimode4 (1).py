@@ -3685,13 +3685,18 @@ def auto_trade_loop(trader, context):
     client.on_trade_opened(_on_open)
     client.on_trade_result(_on_res)
 
-    def do_place(pair, side, amount):
-        """Fire the trade and return the broker's tradeOpened (or {'error': ...})."""
+    def fire(pair, side, amount):
+        """Put the placeTrade message on the wire RIGHT NOW (fast WS send, no wait).
+        Returns None on success or an error string."""
         trader._opened_evt.clear()
         try:
             client.place_trade(pair, side, amount, duration_minutes=1, is_demo=trader.is_demo)
+            return None
         except Exception as e:
-            return {"error": f"place failed: {e}"}
+            return f"place failed: {e}"
+
+    def confirm_opened():
+        """Wait for the broker's tradeOpened (run this in an executor)."""
         if not trader._opened_evt.wait(timeout=8):
             return {"error": "no tradeOpened"}
         opened = dict(trader._last_opened or {})
@@ -3735,11 +3740,14 @@ def auto_trade_loop(trader, context):
             pass
 
     async def sleep_until(ts):
+        # coarse async sleep until ~30ms out, then a tight spin for precise firing
         while True:
             d = ts - _t.time()
-            if d <= 0:
-                return
-            await _aio.sleep(min(d, 0.2))
+            if d <= 0.03:
+                break
+            await _aio.sleep(min(d - 0.02, 0.2))
+        while _t.time() < ts:
+            pass
 
     # editable "live" status line (scanning heartbeat) so we don't flood the chat
     _status = {"id": None}
@@ -3757,6 +3765,22 @@ def auto_trade_loop(trader, context):
 
     def reset_status():
         _status["id"] = None
+
+    async def episode_pause(seconds=32):
+        """After a completed signal/trade episode, pause before scanning again."""
+        if not trader.running:
+            return
+        reset_status()
+        target = _t.time() + seconds
+        while trader.running and _t.time() < target:
+            left = int(round(target - _t.time()))
+            await status(
+                f"⏸️ {fancy_font('PAUSED')}\n"
+                f"🤖 {trader.strategy}. {trader.strategy_name}\n"
+                f"▶️ Resuming scan in {left}s..."
+            )
+            await _aio.sleep(2)
+        reset_status()
 
     async def run():
         st = get_state(trader.uid)            # SAME config as the main-menu signal mode
@@ -3858,15 +3882,23 @@ def auto_trade_loop(trader, context):
             expiry_label = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
             base_amt = round(max(1.0, trader.balance * trader.risk_percent / 100.0), 2)
 
-            await send(_auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, base_amt))
             reset_status()
 
-            # fire EXACTLY at the boundary — place FIRST (zero delay), confirm AFTER
+            # fire EXACTLY at the boundary with minimal latency: put the order on the
+            # wire INLINE (microseconds) the instant the candle opens — announce and
+            # confirm AFTER, so Telegram I/O never delays the entry.
             await sleep_until(boundary)
-            opened = await loop.run_in_executor(None, do_place, pair, side, base_amt)
+            place_err = fire(pair, side, base_amt)
             trader.trade_count += 1
+            await send(_auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, base_amt))
+            if place_err:
+                await send(f"⚠️ Trade error: {place_err}")
+                await episode_pause()
+                continue
+            opened = await loop.run_in_executor(None, confirm_opened)
             if opened.get("error"):
                 await send(f"⚠️ Trade error: {opened['error']}")
+                await episode_pause()
                 continue
             tid = opened.get("id") or opened.get("tradeId")
             await send(
@@ -3878,6 +3910,7 @@ def auto_trade_loop(trader, context):
             res = await loop.run_in_executor(None, wait_result, tid)
             if res.get("error"):
                 await send(f"⚠️ Result error: {res['error']}")
+                await episode_pause()
                 continue
 
             outcome = _auto_classify(res, side)
@@ -3901,6 +3934,7 @@ def auto_trade_loop(trader, context):
                         f"💎 Balance : ${trader.balance:.2f}\n"
                         f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                     )
+                await episode_pause()
                 continue
 
             # ---- LOSS (stake already deducted → balance is final) ----
@@ -3916,6 +3950,7 @@ def auto_trade_loop(trader, context):
             if not trader.mtg_enabled:
                 # respect a short per-pair cooldown after a loss (same as menu)
                 trader._loss_cooldown[pair] = _t.time() + 180
+                await episode_pause()
                 continue
 
             # ---- ZERO-DELAY 1-STEP MARTINGALE (same side, double, on the candle
@@ -3926,11 +3961,11 @@ def auto_trade_loop(trader, context):
             mtg_candle = int(_t.time() // 60) * 60       # current (next) candle start
             if mtg_candle < boundary + 60:
                 mtg_candle = boundary + 60
-                await sleep_until(mtg_candle)            # safety: wait for candle open
+            await sleep_until(mtg_candle)                # ensure the next candle has opened
             mtg_entry = datetime.fromtimestamp(mtg_candle, tz=_UTC5).strftime("%H:%M:%S")
             mtg_expiry = datetime.fromtimestamp(mtg_candle + 60, tz=_UTC5).strftime("%H:%M:%S")
-            # place immediately (zero delay), announce after
-            opened2 = await loop.run_in_executor(None, do_place, pair, side, mtg_amt)
+            # fire INLINE at the candle open (zero delay), announce + confirm after
+            mtg_err = fire(pair, side, mtg_amt)
             trader.trade_count += 1
             await send(
                 f"🔥 {fancy_font('MARTINGALE')}  (Step 1)\n"
@@ -3938,8 +3973,14 @@ def auto_trade_loop(trader, context):
                 f"💲 ${mtg_amt:.2f}  (2x)    ⏰ {mtg_entry} → {mtg_expiry}\n"
                 f"⚡ Zero-delay placed."
             )
+            if mtg_err:
+                await send(f"⚠️ Martingale error: {mtg_err}")
+                await episode_pause()
+                continue
+            opened2 = await loop.run_in_executor(None, confirm_opened)
             if opened2.get("error"):
                 await send(f"⚠️ Martingale error: {opened2['error']}")
+                await episode_pause()
                 continue
             tid2 = opened2.get("id") or opened2.get("tradeId")
             await send(
@@ -3951,6 +3992,7 @@ def auto_trade_loop(trader, context):
             res2 = await loop.run_in_executor(None, wait_result, tid2)
             if res2.get("error"):
                 await send(f"⚠️ Martingale result error: {res2['error']}")
+                await episode_pause()
                 continue
             out2 = _auto_classify(res2, side)
             await _aio.sleep(0.8)
@@ -3978,6 +4020,7 @@ def auto_trade_loop(trader, context):
                     f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                 )
             # true 1-step → back to base amount on the next cycle
+            await episode_pause()
 
         await send(
             f"🔰 {fancy_font('AUTO TRADE STOPPED')}\n"
