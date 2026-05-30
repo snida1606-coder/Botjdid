@@ -3525,26 +3525,28 @@ STRATEGY_NAMES_AUTO = {
     4: "ADX stochastic", 5: "Ultra accurate", 6: "IROF pro"
 }
 
-AUTO_MIN_CONF = 70          # minimum confidence required to place a trade
 AUTO_MAX_PAIRS = 24         # how many high-payout OTC pairs to scan each minute
 _UTC5 = timezone(timedelta(hours=5))
 
 
-def _auto_run_strategy(strategy_id, candles):
-    """Run one of the accurate Quotex strategies (1-6). Returns (direction, entry_dt, conf)."""
+def _auto_run_strategy(strategy_id, candles, st):
+    """Run a strategy with the SAME parameters as the main-menu signal mode
+    (SMZXBot.analyze). Returns (direction, entry_dt, conf)."""
     try:
+        filters = st.strategy2_filters if st.strategy2_filters else Strategy2Filters()
         if strategy_id == 1:
             return analyze_strategy1(candles, 75)
         if strategy_id == 2:
-            return analyze_strategy2(candles, Strategy2Filters())
+            return analyze_strategy2(candles, filters)
         if strategy_id == 3:
-            return analyze_strategy3(candles, 75, 20)
+            return analyze_strategy3(candles, st.strategy3_min_accuracy, st.strategy3_lookback)
         if strategy_id == 4:
-            return analyze_strategy4(candles, 60)
+            return analyze_strategy4(candles, st.strategy4_min_accuracy)
         if strategy_id == 5:
-            return analyze_strategy5(candles, 72)
+            return analyze_strategy5(candles, st.strategy5_min_score)
         if strategy_id == 6:
-            return analyze_strategy6(candles, 20, 10)
+            return analyze_strategy6(candles, st.strategy6_min_score, st.strategy6_min_candles)
+        return analyze_strategy3(candles, 75, 20)
     except Exception:
         pass
     return None, None, None
@@ -3589,29 +3591,50 @@ def _auto_acct_balance(trader):
 
 def _auto_classify(res, side):
     """Decode a broker tradeResult into 'win' | 'loss' | 'tie'.
-    The broker sends numeric codes (1=win, 2=tie, 3=loss); fall back to
-    price comparison if the code is missing."""
-    rc = res.get("result")
-    op = res.get("openPrice")
-    cp = res.get("closePrice")
+
+    Confirmed from LIVE demo data, the broker is inconsistent: the `result`
+    field is sometimes a number and sometimes a string, e.g.
+        {"result": 1,      "profit":  0.92}   -> win
+        {"result": 2,      "profit": -1}      -> loss   (NOT a tie!)
+        {"result": "loss", "profit": -1}      -> loss
+    `profit` is always present and unambiguous, so we trust it first:
+        profit > 0 -> win,  profit < 0 -> loss,  profit == 0 -> tie (refund).
+    """
+    # 1) profit is the most reliable signal
     try:
         profit = float(res.get("profit"))
     except (TypeError, ValueError):
         profit = None
+    if profit is not None:
+        if profit > 0:
+            return "win"
+        if profit < 0:
+            return "loss"
+        return "tie"
+
+    # 2) explicit result field (string or numeric)
+    rc = res.get("result")
+    if isinstance(rc, str):
+        s = rc.strip().lower()
+        if s in ("win", "won"):
+            return "win"
+        if s in ("loss", "lose", "lost"):
+            return "loss"
+        if s in ("tie", "draw", "equal", "refund"):
+            return "tie"
     if rc == 1:
         return "win"
-    if rc == 2:
-        return "tie"
-    if rc == 3:
+    if rc == 2:                       # numeric 2 == LOSS on this broker
         return "loss"
-    if profit is not None and profit > 0:
-        return "win"
+
+    # 3) price-based fallback (flat == loss on this broker)
+    op = res.get("openPrice")
+    cp = res.get("closePrice")
     if op is not None and cp is not None:
-        if cp == op:
-            return "tie"
-        went_up = cp > op
-        won = (went_up and side == "call") or ((not went_up) and side == "put")
-        return "win" if won else "loss"
+        if cp > op:
+            return "win" if side == "call" else "loss"
+        if cp < op:
+            return "win" if side == "put" else "loss"
     return "loss"
 
 
@@ -3662,8 +3685,8 @@ def auto_trade_loop(trader, context):
     client.on_trade_opened(_on_open)
     client.on_trade_result(_on_res)
 
-    def place_and_wait(pair, side, amount):
-        """Place a 1-min turbo trade and block until the broker settles it."""
+    def do_place(pair, side, amount):
+        """Fire the trade and return the broker's tradeOpened (or {'error': ...})."""
         trader._opened_evt.clear()
         try:
             client.place_trade(pair, side, amount, duration_minutes=1, is_demo=trader.is_demo)
@@ -3671,15 +3694,19 @@ def auto_trade_loop(trader, context):
             return {"error": f"place failed: {e}"}
         if not trader._opened_evt.wait(timeout=8):
             return {"error": "no tradeOpened"}
-        opened = trader._last_opened or {}
+        opened = dict(trader._last_opened or {})
         tid = opened.get("id") or opened.get("tradeId")
         if not tid:
             return {"error": "no trade id"}
+        return opened
+
+    def wait_result(tid):
+        """Block until the broker settles trade `tid`."""
         deadline = _t.time() + 240
         while _t.time() < deadline:
             if tid in trader._results:
                 return trader._results.pop(tid)
-            _t.sleep(0.12)
+            _t.sleep(0.1)
         return {"error": "result timeout"}
 
     async def send(msg):
@@ -3697,9 +3724,35 @@ def auto_trade_loop(trader, context):
             d = ts - _t.time()
             if d <= 0:
                 return
-            await _aio.sleep(min(d, 0.4))
+            await _aio.sleep(min(d, 0.2))
+
+    # editable "live" status line (scanning heartbeat) so we don't flood the chat
+    _status = {"id": None}
+
+    async def status(msg):
+        try:
+            if _status["id"] is None:
+                m = await context.bot.send_message(chat_id=trader.uid, text=msg,
+                                                   entities=build_custom_emoji_entities(msg))
+                _status["id"] = m.message_id
+            else:
+                await context.bot.edit_message_text(chat_id=trader.uid, message_id=_status["id"],
+                                                    text=msg, entities=build_custom_emoji_entities(msg))
+        except Exception:
+            try:
+                m = await context.bot.send_message(chat_id=trader.uid, text=msg,
+                                                   entities=build_custom_emoji_entities(msg))
+                _status["id"] = m.message_id
+            except Exception:
+                pass
+
+    def reset_status():
+        _status["id"] = None
 
     async def run():
+        st = get_state(trader.uid)            # SAME config as the main-menu signal mode
+        st.strategy = trader.strategy
+        trader._loss_cooldown = {}            # pair -> epoch until which we skip it
         trader.pairs = _auto_select_pairs(client)
         for p in trader.pairs:
             try:
@@ -3747,51 +3800,75 @@ def auto_trade_loop(trader, context):
                 trader.running = False
                 break
 
-            # ---- wait for the next minute boundary, then act on the fresh closed candle ----
+            # ---- pre-boundary SCAN so we can place EXACTLY at the boundary (zero delay) ----
             now = _t.time()
             boundary = (int(now // 60) + 1) * 60
-            await sleep_until(boundary + 0.25)
+            await sleep_until(boundary - 3)        # wake 3s before the candle opens
             if not trader.running:
                 break
 
-            # ---- scan all pairs, pick the best signal for THIS candle ----
-            best = None  # (conf, pair, direction)
+            entry_label = datetime.fromtimestamp(boundary, tz=_UTC5).strftime("%H:%M")
+            await status(
+                f"🔍 {fancy_font('SCANNING')}\n"
+                f"🤖 {trader.strategy}. {trader.strategy_name}\n"
+                f"📊 {len(trader.pairs)} OTC pairs\n"
+                f"⏰ Next entry : {entry_label}"
+            )
+
+            # menu-style: take the FIRST pair that fires a signal (same as signal mode)
+            chosen = None
             for pair in trader.pairs:
                 if not trader.running:
                     break
+                if trader._loss_cooldown.get(pair, 0) > _t.time():
+                    continue
                 try:
-                    candles = client.get_candles(pair, timeframe=60, count=200, timeout=2)
+                    candles = client.get_candles(pair, timeframe=60, count=210,
+                                                 lookback_minutes=240, timeout=1.0)
                 except Exception:
                     candles = []
-                if not candles or len(candles) < 55:
+                if not candles or len(candles) < 30:
                     continue
-                last_t = candles[-1]["time"]
-                scale = 1000 if last_t > 1e12 else 1
-                cm = boundary * scale
-                closed = [c for c in candles if c["time"] < cm]   # drop the forming candle
-                if len(closed) < 55:
-                    closed = candles
-                direction, _, conf = _auto_run_strategy(trader.strategy, closed)
-                if direction and conf and conf >= AUTO_MIN_CONF:
-                    if best is None or conf > best[0]:
-                        best = (conf, pair, direction)
+                direction, _edt, conf = _auto_run_strategy(trader.strategy, candles, st)
+                if direction:
+                    chosen = (pair, direction, conf or 0)
+                    break
 
-            if not best:
+            if not chosen:
+                await status(
+                    f"🔍 {fancy_font('NO SIGNAL')}\n"
+                    f"🤖 {trader.strategy}. {trader.strategy_name}\n"
+                    f"⏰ {entry_label} — waiting next candle..."
+                )
+                await sleep_until(boundary + 1.0)
                 continue
 
-            conf, pair, direction = best
+            pair, direction, conf = chosen
             side = "call" if direction == "CALL" else "put"
             entry_label = datetime.fromtimestamp(boundary, tz=_UTC5).strftime("%H:%M:%S")
             expiry_label = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
             base_amt = round(max(1.0, trader.balance * trader.risk_percent / 100.0), 2)
 
             await send(_auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, base_amt))
+            reset_status()
 
-            # ---- place the base trade (we are at boundary+0.25s → expires at boundary+60) ----
-            res = await loop.run_in_executor(None, place_and_wait, pair, side, base_amt)
+            # fire EXACTLY at the boundary — place FIRST (zero delay), confirm AFTER
+            await sleep_until(boundary)
+            opened = await loop.run_in_executor(None, do_place, pair, side, base_amt)
             trader.trade_count += 1
+            if opened.get("error"):
+                await send(f"⚠️ Trade error: {opened['error']}")
+                continue
+            tid = opened.get("id") or opened.get("tradeId")
+            await send(
+                f"✅ {fancy_font('TRADE OPENED')}\n"
+                f"📊 {pair}   {'UP/CALL' if side=='call' else 'DOWN/PUT'}\n"
+                f"💲 ${base_amt:.2f}   ⏰ {entry_label} → {expiry_label}\n"
+                f"⏳ Waiting for candle to close..."
+            )
+            res = await loop.run_in_executor(None, wait_result, tid)
             if res.get("error"):
-                await send(f"⚠️ Trade error: {res['error']}")
+                await send(f"⚠️ Result error: {res['error']}")
                 continue
 
             outcome = _auto_classify(res, side)
@@ -3828,21 +3905,43 @@ def auto_trade_loop(trader, context):
             )
 
             if not trader.mtg_enabled:
+                # respect a short per-pair cooldown after a loss (same as menu)
+                trader._loss_cooldown[pair] = _t.time() + 180
                 continue
 
-            # ---- ZERO-DELAY 1-STEP MARTINGALE (same side, double, next candle) ----
+            # ---- ZERO-DELAY 1-STEP MARTINGALE (same side, double, on the candle
+            #      immediately after the entry candle). The base result only arrives
+            #      after the entry candle [boundary, boundary+60] closes, so we are
+            #      already inside the next candle → place RIGHT NOW, no delay. ----
             mtg_amt = round(base_amt * 2, 2)
-            mtg_entry = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
+            mtg_candle = int(_t.time() // 60) * 60       # current (next) candle start
+            if mtg_candle < boundary + 60:
+                mtg_candle = boundary + 60
+                await sleep_until(mtg_candle)            # safety: wait for candle open
+            mtg_entry = datetime.fromtimestamp(mtg_candle, tz=_UTC5).strftime("%H:%M:%S")
+            mtg_expiry = datetime.fromtimestamp(mtg_candle + 60, tz=_UTC5).strftime("%H:%M:%S")
+            # place immediately (zero delay), announce after
+            opened2 = await loop.run_in_executor(None, do_place, pair, side, mtg_amt)
+            trader.trade_count += 1
             await send(
                 f"🔥 {fancy_font('MARTINGALE')}  (Step 1)\n"
                 f"📊 {pair}   {'UP/CALL' if side == 'call' else 'DOWN/PUT'}\n"
-                f"💲 ${mtg_amt:.2f}  (2x)    ⏰ {mtg_entry}\n"
-                f"⚡ Zero-delay — placing now..."
+                f"💲 ${mtg_amt:.2f}  (2x)    ⏰ {mtg_entry} → {mtg_expiry}\n"
+                f"⚡ Zero-delay placed."
             )
-            res2 = await loop.run_in_executor(None, place_and_wait, pair, side, mtg_amt)
-            trader.trade_count += 1
+            if opened2.get("error"):
+                await send(f"⚠️ Martingale error: {opened2['error']}")
+                continue
+            tid2 = opened2.get("id") or opened2.get("tradeId")
+            await send(
+                f"✅ {fancy_font('MTG OPENED')}\n"
+                f"📊 {pair}   {'UP/CALL' if side=='call' else 'DOWN/PUT'}\n"
+                f"💲 ${mtg_amt:.2f}   ⏰ {mtg_entry} → {mtg_expiry}\n"
+                f"⏳ Waiting for candle to close..."
+            )
+            res2 = await loop.run_in_executor(None, wait_result, tid2)
             if res2.get("error"):
-                await send(f"⚠️ Martingale error: {res2['error']}")
+                await send(f"⚠️ Martingale result error: {res2['error']}")
                 continue
             out2 = _auto_classify(res2, side)
             await _aio.sleep(0.8)
