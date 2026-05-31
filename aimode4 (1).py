@@ -4758,22 +4758,26 @@ def auto_trade_loop(trader, context):
                 continue
 
             # ---- LOSS (stake already deducted → balance is final) ----
-            trader.loss_count += 1
-            if not trader.mtg_enabled:
-                trader.loss_streak += 1; trader.win_streak = 0
             trader.balance = _auto_acct_balance(trader)
             pnl = trader.balance - trader.starting_balance
-            await send(
-                f"❌ {fancy_font('LOSS')}  -${base_amt:.2f}\n"
-                f"💎 Balance : ${trader.balance:.2f}\n"
-                f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
-            )
 
             if not trader.mtg_enabled:
+                # no recovery step → this IS the episode loss: count + announce it
+                trader.loss_count += 1
+                trader.loss_streak += 1; trader.win_streak = 0
+                await send(
+                    f"❌ {fancy_font('LOSS')}  -${base_amt:.2f}\n"
+                    f"💎 Balance : ${trader.balance:.2f}\n"
+                    f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
+                )
                 # respect a short per-pair cooldown after a loss (same as menu)
                 trader._loss_cooldown[pair] = _t.time() + 180
                 await episode_pause()
                 continue
+
+            # MTG ON → skip the base-loss message entirely and go STRAIGHT to the
+            # Martingale step. The episode loss is counted ONCE, only if the MTG
+            # step also fails (so an MTG-recovered episode is not counted as a loss).
 
             # ---- ZERO-DELAY 1-STEP MARTINGALE (same side, double, on the candle
             #      immediately after the entry candle). The base result only arrives
@@ -4830,9 +4834,12 @@ def auto_trade_loop(trader, context):
                     f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                 )
             elif out2 == "tie":
-                trader.tie_count += 1
+                # MTG refunded but the base candle still lost → net loss for the
+                # episode → count it ONCE as the episode loss
+                trader.loss_count += 1
+                trader.loss_streak += 1; trader.win_streak = 0
                 await send(
-                    f"🔅 {fancy_font('MTG TIE')}  (refund)\n"
+                    f"🔅 {fancy_font('MTG TIE')}  (base lost, MTG refund)\n"
                     f"💎 Balance : ${trader.balance:.2f}\n"
                     f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                 )
@@ -4901,7 +4908,7 @@ def _auto_strategy_keyboard():
     rows = []
     for i in range(1, 7):
         style = KeyboardButtonStyle.PRIMARY if i % 2 else KeyboardButtonStyle.SUCCESS
-        rows.append([colored_button(f" {i}. {STRATEGY_NAMES_AUTO.get(i, '')}", f"atx_strat_{i}", style)])
+        rows.append([colored_button(f"Strategy {i}", f"atx_strat_{i}", style)])
     return InlineKeyboardMarkup(rows)
 
 
