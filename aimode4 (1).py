@@ -4431,7 +4431,6 @@ def _auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, 
         f"💲 Amount    : ${amount:.2f}  ({trader.risk_percent:.1f}%)\n"
         f"🔰 Accuracy  : {conf:.0f}%\n"
         f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
-        f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🔥 Placing at entry time...\n"
         f"✨ Powered by SMZX ✨"
@@ -4574,7 +4573,6 @@ def auto_trade_loop(trader, context):
         await send(
             f"🚀 {fancy_font('AUTO TRADE STARTED')}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
             f"💎 Balance   : ${trader.balance:.2f}\n"
             f"🔰 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
             f"💲 Risk      : {trader.risk_percent:.1f}% / trade\n"
@@ -4596,32 +4594,35 @@ def auto_trade_loop(trader, context):
             # ---- PAUSE: hold here (no scanning, no trading) until resumed ----
             if getattr(trader, "paused", False):
                 reset_status()
+                # notify ONCE (no repeating spam), then wait quietly
+                await send(
+                    f"⏳ {fancy_font('PAUSED')}\n"
+                    f"🚀 Tap Resume to continue scanning."
+                )
                 while trader.running and getattr(trader, "paused", False):
-                    await status(
-                        f"⏳ {fancy_font('PAUSED')}\n"
-                        f"🤖 {trader.strategy}. {trader.strategy_name}\n"
-                        f"🚀 Tap Resume to continue scanning."
-                    )
-                    await _aio.sleep(2)
-                reset_status()
+                    await _aio.sleep(1)
                 if not trader.running:
                     break
+                await send(f"🚀 {fancy_font('RESUMED')}\nScanning again...")
+                reset_status()
 
             # ---- AUTO-RECONNECT: wait out a dropped WebSocket before scanning ----
             if not getattr(client, "_authenticated", True):
                 reset_status()
-                for _ in range(30):
+                # notify ONCE, then wait quietly for the link to come back
+                await send(
+                    f"🚨 {fancy_font('RECONNECTING')}\n"
+                    f"🔍 Lost broker link — restoring connection..."
+                )
+                for _ in range(60):
                     if not trader.running or getattr(client, "_authenticated", False):
                         break
-                    await status(
-                        f"🚨 {fancy_font('RECONNECTING')}\n"
-                        f"🔍 Lost broker link — restoring connection..."
-                    )
-                    await _aio.sleep(2)
-                reset_status()
+                    await _aio.sleep(1)
                 if not trader.running:
                     break
-                if not getattr(client, "_authenticated", False):
+                if getattr(client, "_authenticated", False):
+                    await send(f"✅ {fancy_font('RECONNECTED')}\nResuming scan...")
+                else:
                     continue  # still down → retry the guard
 
             # ---- TP / SL check ----
@@ -4987,7 +4988,6 @@ def _auto_status_card(trader):
         f"📊 {fancy_font('AUTO STATUS')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⚙️ State    : {state}\n"
-        f"💎 Account  : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"🤖 Strategy : {trader.strategy}. {trader.strategy_name}\n"
         f"💎 Balance  : ${float(trader.balance or 0):.2f}\n"
         f"📈 Session  : {pnl:+.2f}\n"
@@ -5010,7 +5010,6 @@ def _auto_report_card(trader, title="DAILY REPORT"):
     return (
         f"{head} {fancy_font(title)}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💎 Account  : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"🤖 Strategy : {trader.strategy}. {trader.strategy_name}\n"
         f"💎 Balance  : ${float(trader.starting_balance or 0):.2f} → ${float(trader.balance or 0):.2f}\n"
         f"📈 Net P&L  : {pnl:+.2f}\n"
@@ -5062,7 +5061,6 @@ async def auto_account_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trader.starting_balance = trader.balance
     context.user_data['state'] = STATE_AUTO_STRATEGY
     msg = (
-        f"💎 Account : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"💎 Balance : ${trader.balance:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🤖 {fancy_font('SELECT STRATEGY')}"
@@ -5166,7 +5164,6 @@ async def auto_mtg_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🔰 {fancy_font('CONFIRM AUTO TRADE')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"💎 Balance   : ${trader.balance:.2f}\n"
         f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
         f"🔰 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
