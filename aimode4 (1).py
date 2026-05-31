@@ -2882,6 +2882,14 @@ STATE_AUTO_CONFIRM = 48
 STATE_AUTO_RUNNING = 49
 STATE_AUTO_ACCOUNT = 50
 STATE_AUTO_RISK = 51
+# per-strategy parameter states (mirror the main-menu Start-Trading flow)
+STATE_AUTO_S2_ACC = 52
+STATE_AUTO_S3_ACC = 53
+STATE_AUTO_S3_LB = 54
+STATE_AUTO_S4_ACC = 55
+STATE_AUTO_S5_SCORE = 56
+STATE_AUTO_S6_SCORE = 57
+STATE_AUTO_S6_CANDLES = 58
 
 # ══════════════ HELPER FUNCTIONS FOR BUTTONS & ENTITIES ══════════════
 def colored_button(text, callback_data, style=KeyboardButtonStyle.PRIMARY, emoji_id=None):
@@ -3526,7 +3534,23 @@ STRATEGY_NAMES_AUTO = {
 }
 
 AUTO_MAX_PAIRS = 24         # how many high-payout OTC pairs to scan each minute
+AUTO_PAIR_COOLDOWN = 240    # seconds a pair is skipped after it was just traded (no back-to-back repeats)
 _UTC5 = timezone(timedelta(hours=5))
+
+
+def _auto_int(text, lo, hi):
+    """Parse a bounded integer from user text (reuses clean_int_input)."""
+    try:
+        v = int(clean_int_input(text))
+        if lo <= v <= hi:
+            return v
+    except Exception:
+        pass
+    return None
+
+
+def _auto_tp_prompt_body():
+    return f"💲 Enter Take Profit (TP) in $  (e.g. 10):"
 
 
 def _auto_run_strategy(strategy_id, candles, st):
@@ -3650,11 +3674,11 @@ def _auto_signal_card(trader, pair, direction, conf, entry_label, expiry_label, 
         f"⏰ Entry     : {entry_label}\n"
         f"🕐 Expiry    : {expiry_label}\n"
         f"💲 Amount    : ${amount:.2f}  ({trader.risk_percent:.1f}%)\n"
-        f"🎯 Accuracy  : {conf:.0f}%\n"
+        f"🔰 Accuracy  : {conf:.0f}%\n"
         f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
-        f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Placing at entry time...\n"
+        f"🔥 Placing at entry time...\n"
         f"✨ Powered by SMZX ✨"
     )
 
@@ -3795,9 +3819,9 @@ def auto_trade_loop(trader, context):
         await send(
             f"🚀 {fancy_font('AUTO TRADE STARTED')}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+            f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
             f"💎 Balance   : ${trader.balance:.2f}\n"
-            f"🎯 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
+            f"🔰 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
             f"💲 Risk      : {trader.risk_percent:.1f}% / trade\n"
             f"🔥 Martingale: {'ON (1-step)' if trader.mtg_enabled else 'OFF'}\n"
             f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
@@ -3877,6 +3901,9 @@ def auto_trade_loop(trader, context):
                 continue
 
             pair, direction, conf = chosen
+            # mark this pair so it is NOT picked again back-to-back (no repeated
+            # signals on the same pair); it becomes eligible again after cooldown
+            trader._loss_cooldown[pair] = _t.time() + AUTO_PAIR_COOLDOWN
             side = "call" if direction == "CALL" else "put"
             entry_label = datetime.fromtimestamp(boundary, tz=_UTC5).strftime("%H:%M:%S")
             expiry_label = datetime.fromtimestamp(boundary + 60, tz=_UTC5).strftime("%H:%M:%S")
@@ -3930,7 +3957,7 @@ def auto_trade_loop(trader, context):
                     )
                 else:
                     await send(
-                        f"➖ {fancy_font('TIE')}  (refund)\n"
+                        f"🔅 {fancy_font('TIE')}  (refund)\n"
                         f"💎 Balance : ${trader.balance:.2f}\n"
                         f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                     )
@@ -3971,7 +3998,7 @@ def auto_trade_loop(trader, context):
                 f"🔥 {fancy_font('MARTINGALE')}  (Step 1)\n"
                 f"📊 {pair}   {'UP/CALL' if side == 'call' else 'DOWN/PUT'}\n"
                 f"💲 ${mtg_amt:.2f}  (2x)    ⏰ {mtg_entry} → {mtg_expiry}\n"
-                f"⚡ Zero-delay placed."
+                f"🔥 Zero-delay placed."
             )
             if mtg_err:
                 await send(f"⚠️ Martingale error: {mtg_err}")
@@ -4008,7 +4035,7 @@ def auto_trade_loop(trader, context):
                 )
             elif out2 == "tie":
                 await send(
-                    f"➖ {fancy_font('MTG TIE')}  (refund)\n"
+                    f"🔅 {fancy_font('MTG TIE')}  (refund)\n"
                     f"💎 Balance : ${trader.balance:.2f}\n"
                     f"📊 Session : {pnl:+.2f}   |   {trader.win_count}W / {trader.loss_count}L"
                 )
@@ -4043,8 +4070,68 @@ def auto_trade_loop(trader, context):
 
 
 # ══════════════ AUTO TRADE — conversation handlers (state-routed) ══════════════
+def _auto_account_message(trader):
+    """Account-selection message + DEMO/REAL keyboard (reused on first login and re-entry)."""
+    demo_b = real_b = 0.0
+    try:
+        b = trader.client.balance or {}
+        ui = trader.client.user_info or {}
+        demo_b = ui.get("demoBalance", b.get("demoBalance", 0)) or 0
+        real_b = ui.get("realBalance", b.get("realBalance", 0)) or 0
+    except Exception:
+        pass
+    msg = (
+        f"✅ {fancy_font('LOGGED IN')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💎 Demo : ${float(demo_b or 0):.2f}\n"
+        f"💲 Real : ${float(real_b or 0):.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💎 Select account:"
+    )
+    buttons = [[InlineKeyboardButton("🧪 DEMO", callback_data="atx_acc_demo"),
+                InlineKeyboardButton("💲 REAL", callback_data="atx_acc_real")]]
+    return msg, InlineKeyboardMarkup(buttons)
+
+
+def _auto_strategy_keyboard():
+    """Colored strategy boxes (1-6), same look as the main-menu Start-Trading flow."""
+    rows = []
+    for i in range(1, 7):
+        style = KeyboardButtonStyle.PRIMARY if i % 2 else KeyboardButtonStyle.SUCCESS
+        rows.append([colored_button(f" {i}. {STRATEGY_NAMES_AUTO.get(i, '')}", f"atx_strat_{i}", style)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_auto_s2_filters(filters):
+    """Strategy-2 optional filter toggles (auto-mode, atx_ prefixed callbacks)."""
+    status = lambda x: "✅" if x else "❌"
+    text = (
+        f"🔍 {fancy_font('TOGGLE FILTERS')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{status(filters.use_trend)} Trend\n"
+        f"{status(filters.use_bollinger)} Bollinger\n"
+        f"{status(filters.use_support_resistance)} S/R\n"
+        f"{status(filters.use_price_action)} Price Action\n"
+        f"{status(filters.use_supertrend)} Supertrend\n"
+        f"{status(filters.use_fvg)} FVG\n"
+        f"{status(filters.use_trend_reverse)} Trend Reverse\n\n"
+        f"Tap to toggle, then Done."
+    )
+    buttons = [
+        [InlineKeyboardButton(f"{status(filters.use_trend)} Trend", callback_data="atx_s2_trend")],
+        [InlineKeyboardButton(f"{status(filters.use_bollinger)} Bollinger", callback_data="atx_s2_bb")],
+        [InlineKeyboardButton(f"{status(filters.use_support_resistance)} S/R", callback_data="atx_s2_sr")],
+        [InlineKeyboardButton(f"{status(filters.use_price_action)} Price Action", callback_data="atx_s2_pa")],
+        [InlineKeyboardButton(f"{status(filters.use_supertrend)} Supertrend", callback_data="atx_s2_st")],
+        [InlineKeyboardButton(f"{status(filters.use_fvg)} FVG", callback_data="atx_s2_fvg")],
+        [InlineKeyboardButton(f"{status(filters.use_trend_reverse)} Trend Reverse", callback_data="atx_s2_tr")],
+        [InlineKeyboardButton("✅ Done", callback_data="atx_s2_done")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
 async def auto_trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point (menu button). Ask for the TradoWix email."""
+    """Entry point (menu button). Ask for the TradoWix email — or skip if already logged in."""
     query = update.callback_query
     uid = query.from_user.id
     if not is_authorized(uid):
@@ -4057,8 +4144,19 @@ async def auto_trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(msg, entities=build_custom_emoji_entities(msg))
         return
     context.user_data['strategy_active'] = False
+    # Already logged in this session → skip email/password, go straight to account selection
+    if trader.client is not None:
+        trader.balance = _auto_acct_balance(trader)
+        context.user_data['state'] = STATE_AUTO_ACCOUNT
+        msg, markup = _auto_account_message(trader)
+        await query.message.reply_text(msg, entities=build_custom_emoji_entities(msg), reply_markup=markup)
+        return
     context.user_data['state'] = STATE_AUTO_LOGIN_EMAIL
-    msg = f"🚀 {fancy_font('AUTO TRADE SETUP')}\n\n📧 Enter your TradoWix email:"
+    msg = (
+        f"🚀 {fancy_font('AUTO TRADE SETUP')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📧 Enter your TradoWix email:"
+    )
     await query.message.reply_text(msg, entities=build_custom_emoji_entities(msg))
 
 
@@ -4072,35 +4170,98 @@ async def auto_account_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trader.starting_balance = trader.balance
     context.user_data['state'] = STATE_AUTO_STRATEGY
     msg = (
-        f"🏦 Account : {'DEMO' if trader.is_demo else 'REAL'}\n"
-        f"💎 Balance : ${trader.balance:.2f}\n\n"
-        f"🤖 Select Strategy (1-6):"
+        f"💎 Account : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"💎 Balance : ${trader.balance:.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 {fancy_font('SELECT STRATEGY')}"
     )
-    buttons = [
-        [InlineKeyboardButton("1️⃣ RSI basic", callback_data="atx_strat_1"),
-         InlineKeyboardButton("2️⃣ EMA filtered", callback_data="atx_strat_2")],
-        [InlineKeyboardButton("3️⃣ WR divergence", callback_data="atx_strat_3"),
-         InlineKeyboardButton("4️⃣ ADX stochastic", callback_data="atx_strat_4")],
-        [InlineKeyboardButton("5️⃣ Ultra accurate", callback_data="atx_strat_5"),
-         InlineKeyboardButton("6️⃣ IROF pro", callback_data="atx_strat_6")],
-    ]
     await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg),
-                                  reply_markup=InlineKeyboardMarkup(buttons))
+                                  reply_markup=_auto_strategy_keyboard())
 
 
 async def auto_strategy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Strategy chosen → collect that strategy's particular parameters (like the main menu)."""
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     trader = get_auto_trader(uid)
-    trader.strategy = int(query.data.split("_")[-1])
-    trader.strategy_name = STRATEGY_NAMES_AUTO.get(trader.strategy, "Unknown")
-    context.user_data['state'] = STATE_AUTO_TP
-    msg = (
-        f"🤖 Strategy : {trader.strategy}. {trader.strategy_name}\n\n"
-        f"🎯 Enter Take Profit (TP) in $ (e.g. 10):"
+    s = int(query.data.split("_")[-1])
+    trader.strategy = s
+    trader.strategy_name = STRATEGY_NAMES_AUTO.get(s, "Unknown")
+    st = get_state(uid)
+    st.strategy = s
+    head = (
+        f"🤖 {fancy_font('STRATEGY')} : {s}. {trader.strategy_name}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
     )
+    if s == 1:
+        # no parameters → straight to Take Profit
+        context.user_data['state'] = STATE_AUTO_TP
+        msg = head + _auto_tp_prompt_body()
+        await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
+        return
+    if s == 2:
+        trader._s2_filters = Strategy2Filters()
+        msg = head + "🔍 Enable additional filters?"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data="atx_s2_filters_yes"),
+                                    InlineKeyboardButton("❌ No", callback_data="atx_s2_filters_no")]])
+        await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg), reply_markup=kb)
+        return
+    if s == 3:
+        context.user_data['state'] = STATE_AUTO_S3_ACC
+        msg = head + "🔅 Enter min accuracy %  (50-100):"
+    elif s == 4:
+        context.user_data['state'] = STATE_AUTO_S4_ACC
+        msg = head + "🔅 Enter min accuracy %  (50-100):"
+    elif s == 5:
+        context.user_data['state'] = STATE_AUTO_S5_SCORE
+        msg = head + "🔅 Enter min score  (50-100):"
+    else:  # s == 6
+        context.user_data['state'] = STATE_AUTO_S6_SCORE
+        msg = head + "🔅 Enter min confluence score  (70-100):"
     await query.message.edit_text(msg, entities=build_custom_emoji_entities(msg))
+
+
+async def auto_s2_filter_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    trader._s2_filters = Strategy2Filters()
+    if query.data.endswith("_no"):
+        get_state(uid).strategy2_filters = trader._s2_filters
+        context.user_data['state'] = STATE_AUTO_S2_ACC
+        m = "🔅 Filters off.\n🔅 Enter min accuracy %  (50-100):"
+        await query.message.edit_text(m, entities=build_custom_emoji_entities(m))
+        return
+    text, markup = _build_auto_s2_filters(trader._s2_filters)
+    await query.message.edit_text(text, entities=build_custom_emoji_entities(text), reply_markup=markup)
+
+
+async def auto_s2_filter_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trader = get_auto_trader(uid)
+    filters = getattr(trader, "_s2_filters", None) or Strategy2Filters()
+    trader._s2_filters = filters
+    toggle_map = {
+        "atx_s2_trend": "use_trend", "atx_s2_bb": "use_bollinger",
+        "atx_s2_sr": "use_support_resistance", "atx_s2_pa": "use_price_action",
+        "atx_s2_st": "use_supertrend", "atx_s2_fvg": "use_fvg",
+        "atx_s2_tr": "use_trend_reverse",
+    }
+    if query.data in toggle_map:
+        attr = toggle_map[query.data]
+        setattr(filters, attr, not getattr(filters, attr))
+        text, markup = _build_auto_s2_filters(filters)
+        await query.message.edit_text(text, entities=build_custom_emoji_entities(text), reply_markup=markup)
+        return
+    if query.data == "atx_s2_done":
+        get_state(uid).strategy2_filters = filters
+        context.user_data['state'] = STATE_AUTO_S2_ACC
+        m = "🔅 Filters saved.\n🔅 Enter min accuracy %  (50-100):"
+        await query.message.edit_text(m, entities=build_custom_emoji_entities(m))
 
 
 async def auto_mtg_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4111,12 +4272,12 @@ async def auto_mtg_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trader.mtg_enabled = query.data.endswith("on")
     context.user_data['state'] = STATE_AUTO_CONFIRM
     msg = (
-        f"🎯 {fancy_font('CONFIRM AUTO TRADE')}\n"
+        f"🔰 {fancy_font('CONFIRM AUTO TRADE')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🏦 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
+        f"💎 Account   : {'DEMO' if trader.is_demo else 'REAL'}\n"
         f"💎 Balance   : ${trader.balance:.2f}\n"
         f"🤖 Strategy  : {trader.strategy}. {trader.strategy_name}\n"
-        f"🎯 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
+        f"🔰 TP : ${trader.tp_target:.2f}    🔰 SL : ${trader.sl_target:.2f}\n"
         f"💲 Risk      : {trader.risk_percent:.1f}% / trade\n"
         f"🔥 Martingale: {'ON (1-step)' if trader.mtg_enabled else 'OFF'}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -4295,7 +4456,7 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"💎 Demo : ${float(demo_b or 0):.2f}\n"
                 f"💲 Real : ${float(real_b or 0):.2f}\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"🏦 Select account:"
+                f"💎 Select account:"
             )
             buttons = [[InlineKeyboardButton("🧪 DEMO", callback_data="atx_acc_demo"),
                         InlineKeyboardButton("💲 REAL", callback_data="atx_acc_real")]]
@@ -4357,6 +4518,86 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(m, entities=build_custom_emoji_entities(m),
                                         reply_markup=InlineKeyboardMarkup(buttons))
         return
+
+    # ---- Auto Trade per-strategy parameter states (mirror main-menu params) ----
+    elif state == STATE_AUTO_S2_ACC:
+        st = get_state(uid)
+        v = _auto_int(text, 50, 100)
+        if v is None:
+            m = "❌ Enter a number between 50-100:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        if st.strategy2_filters is None:
+            st.strategy2_filters = Strategy2Filters()
+        st.strategy2_filters.min_accuracy = v
+        context.user_data['state'] = STATE_AUTO_TP
+        m = f"✅ Min accuracy : {v}%\n\n" + _auto_tp_prompt_body()
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S3_ACC:
+        st = get_state(uid)
+        v = _auto_int(text, 50, 100)
+        if v is None:
+            m = "❌ Enter a number between 50-100:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy3_min_accuracy = v
+        context.user_data['state'] = STATE_AUTO_S3_LB
+        m = f"✅ Min accuracy : {v}%\n\n🔅 Enter lookback period  (10-30):"
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S3_LB:
+        st = get_state(uid)
+        v = _auto_int(text, 10, 30)
+        if v is None:
+            m = "❌ Enter a number between 10-30:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy3_lookback = v
+        context.user_data['state'] = STATE_AUTO_TP
+        m = f"✅ Lookback : {v}\n\n" + _auto_tp_prompt_body()
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S4_ACC:
+        st = get_state(uid)
+        v = _auto_int(text, 50, 100)
+        if v is None:
+            m = "❌ Enter a number between 50-100:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy4_min_accuracy = v
+        context.user_data['state'] = STATE_AUTO_TP
+        m = f"✅ Min accuracy : {v}%\n\n" + _auto_tp_prompt_body()
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S5_SCORE:
+        st = get_state(uid)
+        v = _auto_int(text, 50, 100)
+        if v is None:
+            m = "❌ Enter a number between 50-100:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy5_min_score = v
+        context.user_data['state'] = STATE_AUTO_TP
+        m = f"✅ Min score : {v}\n\n" + _auto_tp_prompt_body()
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S6_SCORE:
+        st = get_state(uid)
+        v = _auto_int(text, 70, 100)
+        if v is None:
+            m = "❌ Enter a number between 70-100:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy6_min_score = v
+        context.user_data['state'] = STATE_AUTO_S6_CANDLES
+        m = f"✅ Min score : {v}\n\n🔅 Enter min candles  (10-200):"
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+
+    elif state == STATE_AUTO_S6_CANDLES:
+        st = get_state(uid)
+        v = _auto_int(text, 10, 200)
+        if v is None:
+            m = "❌ Enter a number between 10-200:"
+            await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
+        st.strategy6_min_candles = v
+        context.user_data['state'] = STATE_AUTO_TP
+        m = f"✅ Min candles : {v}\n\n" + _auto_tp_prompt_body()
+        await update.message.reply_text(m, entities=build_custom_emoji_entities(m)); return
 
     # ---- Other existing states ----
     if state == STATE_CHECKER_CUSTOM_DATE:
@@ -5258,6 +5499,8 @@ def main():
     app.add_handler(CallbackQueryHandler(auto_trade_start, pattern="^auto_trade_start$"))
     app.add_handler(CallbackQueryHandler(auto_account_cb, pattern=r"^atx_acc_(demo|real)$"))
     app.add_handler(CallbackQueryHandler(auto_strategy_cb, pattern=r"^atx_strat_\d+$"))
+    app.add_handler(CallbackQueryHandler(auto_s2_filter_choice, pattern=r"^atx_s2_filters_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(auto_s2_filter_toggle, pattern=r"^atx_s2_(trend|bb|sr|pa|st|fvg|tr|done)$"))
     app.add_handler(CallbackQueryHandler(auto_mtg_cb, pattern=r"^atx_mtg_(on|off)$"))
     app.add_handler(CallbackQueryHandler(auto_start_cb, pattern="^atx_start$"))
     app.add_handler(CallbackQueryHandler(auto_cancel_cb, pattern="^atx_cancel$"))
